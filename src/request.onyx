@@ -1,0 +1,62 @@
+package http.client
+
+use core {alloc, io, string, iter}
+
+Request :: struct {
+    method: Method;
+    headers: Headers;
+    body: [] u8;
+
+    url: Url;
+    cookies: CookieJar;
+}
+
+new_request :: (method: Method, url: str) -> ^Request {
+    u := destructure_url(url);
+
+    return alloc.on_heap(Request.{
+        method = method,
+        url = u,
+    });
+}
+
+#inject Request {
+    free :: (r: ^Request) {
+        r.headers->free();
+        r.cookies->free();
+
+        // Should the body be freed here?
+        // Or is that the producers responsibility?
+
+        cfree(r);
+    }
+
+    set_cookie :: (r: ^Request, key, value: str) {
+        r.cookies->set(.{ key, value });
+    }
+
+    write :: (r: ^Request, w: ^io.Writer) {
+        io.write_format(w, "{} {}{} {}\r\n",
+            string.as_str(r.method),
+            r.url.resource,
+            r.url.rawQuery,
+            string.as_str(r.url.protocol));
+
+        io.write_format(w, "Host: {}\r\n", r.url.host);
+
+        r.cookies->write_header(r.url, w);
+
+        if r.body {
+            r.headers->set("Content-Length", core.tprintf("{}", r.body.count));
+        }
+
+        r.headers->write(w);
+
+        io.write(w, "\r\n");
+        if r.body {
+            io.write(w, r.body);
+        }
+
+        io.writer_flush(w);
+    }
+}

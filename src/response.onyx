@@ -1,0 +1,102 @@
+package http.client
+
+use core {string, conv, io, array}
+
+Response :: struct {
+    status: u32;
+    headers: Headers;
+
+    body: [] u8;
+}
+
+#inject Response {
+    free :: (r: ^Response) {
+        if r == null do return;
+
+        r.headers->free();
+        delete(^r.body);
+        cfree(r);
+    }
+}
+
+#package
+parse_response :: (r: ^io.Reader) -> ^Response {
+    resp := new(Response);
+
+    status_line := r->read_line(consume_newline=true, inplace=true);
+    protocol, status_line' := string.bisect(status_line, #char " ");
+
+    if protocol == "HTTP/1.1" || protocol == "HTTP/1.0" {
+        resp.status = ~~ conv.parse_int(status_line);
+
+    } else {
+        resp->free();
+        return null;
+    }
+
+    resp.headers = Headers.make();
+
+    while true {
+        line := r->read_line(consume_newline=true);
+        defer delete(^line);
+        if line == "\r\n" do break;
+
+        key, value := string.bisect(line, #char ":");
+        string.advance(^value, 1);
+        string.strip_trailing_whitespace(^value);
+
+        resp.headers->add(key, string.temp_copy(value));
+    }
+
+    body: [..] u8;
+    if resp.headers->get("transfer-encoding") == "chunked" {
+        read_chunked_body(r, ^body);
+
+    } else {
+        content_length: u32 = ~~ conv.parse_int(resp.headers->get("content-length"));
+
+        if content_length > 0 {
+            read_simple_body(r, ^body, content_length);
+        }
+    }
+
+    resp.body = body;
+
+    return resp;
+}
+
+#local
+read_chunked_body :: (r: ^io.Reader, body: ^[..] u8) {
+    while true {
+        line := r->read_line(consume_newline=true, inplace=true);
+        chunk_size := cast(u32) conv.parse_int(line, base=16);
+        if chunk_size == 0 do break;
+
+        array.ensure_capacity(body, body.count + chunk_size);
+        read_n_bytes(r, body, chunk_size);
+
+        r->advance_line();
+    }
+}
+
+#local
+read_simple_body :: (r: ^io.Reader, body: ^[..] u8, content_length: u32) {
+    array.ensure_capacity(body, content_length);
+    read_n_bytes(r, body, content_length);
+}
+
+#local
+read_n_bytes :: (r: ^io.Reader, body: ^[..] u8, n: u32) {
+    to_read := n;
+    while to_read > 0 {
+        bytes_read, err := r->read_bytes(body.data[body.count .. body.count + to_read]);
+        to_read -= bytes_read;
+        body.count += bytes_read;
+    }
+}
+
+
+#if #defined(package json) {
+    #inject
+    Response.as_json :: (r: ^Response) => json.decode(r.body);
+}

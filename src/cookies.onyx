@@ -1,0 +1,130 @@
+package http.client
+
+use core {time, io, string, iter}
+
+#doc """ TODO """
+CookieJar :: struct {
+    cookies: Map(str, Cookie);
+
+    string_pool: string.StringPool;
+}
+
+#doc """ TODO """
+Cookie :: struct {
+    key, value: str;
+    expires: u64; // Unix time
+    max_age: u32;
+    domain: str;
+    path: str;
+
+    uenc_key, uenc_value: str;
+}
+
+#inject CookieJar {
+    #doc """ TODO """
+    make :: () => CookieJar.{
+        cookies = make(Map(str, Cookie)),
+
+        // The largest possible cookie length is 4096 bytes,
+        // as specified in RFC 2109.
+        string_pool = string.pool_make(4096)
+    }
+
+    #doc """ TODO """
+    free :: (c: ^CookieJar) {
+        delete(^c.cookies);
+        c.string_pool->free();
+    }
+
+    #doc """ TODO """
+    clear :: (c: ^CookieJar) {
+        c.cookies->clear();
+        c.string_pool->flush();
+    }
+
+    clone :: (c: ^CookieJar) -> CookieJar {
+        new_jar := CookieJar.make();
+
+        for iter.as_iterator(^c.cookies) {
+            new_jar->set(it.value);
+        }
+
+        return new_jar;
+    }
+
+    set :: (c: ^CookieJar, cookie: Cookie) {
+        new_cookie := cookie;
+        new_cookie.key   = c.string_pool->add(new_cookie.key);
+        new_cookie.value = c.string_pool->add(new_cookie.value);
+
+        if !new_cookie.uenc_key {
+            encoded_key := urlencode(new_cookie.key);
+            defer delete(^encoded_key);
+
+            new_cookie.uenc_key = c.string_pool->add(encoded_key);
+
+        } else {
+            new_cookie.uenc_key = c.string_pool->add(new_cookie.uenc_key);
+        }
+
+        if !new_cookie.uenc_value {
+            encoded_value := urlencode(new_cookie.value);
+            defer delete(^encoded_value);
+
+            new_cookie.uenc_value = c.string_pool->add(encoded_value);
+
+        } else {
+            new_cookie.uenc_value = c.string_pool->add(new_cookie.uenc_value);
+        }
+
+        c.cookies[new_cookie.key] = new_cookie;
+    }
+
+    #doc """ TODO """
+    ingress_from_headers :: (c: ^CookieJar, h: Headers) {
+        for h->values("set-cookie") {
+            key_value, props := string.bisect(it, #char ";");
+            if props do core.printf("Skipping cookie props: {}\n", props);
+
+            key, value := string.bisect(key_value, #char "=");
+
+            encoded_key   := c.string_pool->add(key);
+            encoded_value := c.string_pool->add(value);
+
+            decoded_key   := c.string_pool->add(key);
+            decoded_value := c.string_pool->add(value);
+
+            decoded_key = urldecode(decoded_key, decoded_key);
+            decoded_value = urldecode(decoded_value, decoded_value);
+
+            c.cookies[decoded_key] = .{
+                decoded_key, decoded_value,
+
+                uenc_key = encoded_key,
+                uenc_value = encoded_value,
+            };
+        }
+    }
+
+    #doc """ TODO """
+    write_header :: (c: ^CookieJar, url: Url, w: ^io.Writer) {
+        if c.cookies->empty() do return;
+
+        for iter.as_iterator(^c.cookies)
+        {
+            if #first
+            {
+                io.write(w, "Cookie: ");
+            }
+            else
+            {
+                io.write(w, "; ");
+            }
+
+            io.write_format(w, "{}={}", it.value.uenc_key, it.value.uenc_value);
+        }
+
+        if !(c.cookies->empty()) do io.write(w, "\r\n");
+    }
+}
+

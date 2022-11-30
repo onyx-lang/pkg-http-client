@@ -1,0 +1,87 @@
+package http.client
+
+use core {sync}
+
+Client :: struct {
+    transport: ^Transport = ^default_transport;
+
+    default_headers: Headers = Headers.make();
+
+    cookies: CookieJar = CookieJar.make();
+}
+
+#inject Client {
+    free :: (c: ^Client) {
+        c.default_headers->free();
+        c.cookies->free();
+    }
+
+    send :: (c: ^Client, req: ^Request) -> ^Response {
+        return c.transport->send_request(req);
+    }
+
+    new_request :: (c: ^Client, method: Method, url: str) -> ^Request {
+        req := http.client.new_request(method, url);
+        req.headers = c.default_headers->clone();
+        req.cookies = c.cookies->clone();
+        return req;
+    }
+
+    get :: (c: ^Client, url: str) -> ^Response {
+        req := new_request(.Get, url);
+
+        defer req->free();
+
+        return c->send(req);
+    }
+
+    post :: (c: ^Client, url: str, content_type: str, data: [] u8) -> ^Response {
+        req := new_request(.Post, url);
+        req.headers->set("content-type", content_type);
+        req.body = data;
+
+        defer req->free();
+
+        return c->send(req);
+    }
+}
+
+
+
+
+default_client: Client;
+#local default_client_init_once: sync.Once
+#local init_default_client :: () {
+    default_client = .{};
+}
+
+get :: #match #local {}
+
+#overload
+get :: (url: str, query_params: [] struct {key, value: str}) -> ^Response {
+    q := Query.{};
+    defer q->free();
+
+    for ^ query_params do q->set(it.key, it.value);
+
+    return get(url, ^q);
+}
+
+#overload
+get :: (url: str, query: ^Query = null) -> ^Response {
+    default_client_init_once->exec(init_default_client);
+
+    req := default_client->new_request(.Get, url);
+    defer req->free();
+
+    if query do req.url.rawQuery = query->encode();
+
+    return default_client->send(req);
+}
+
+post :: (url: str, content_type: str, data: [] u8) -> ^Response {
+    default_client_init_once->exec(init_default_client);
+
+    return default_client->post(url, content_type, data);
+}
+

@@ -1,0 +1,41 @@
+#load "./module"
+#load "./../json/module"
+
+use core
+
+main :: () {
+    client := http.client.Client.{};
+    defer client->free();
+
+    client.default_headers->set("Accept", "*/*");
+    client.default_headers->set("User-Agent", "onyx-http-client/0.0.1");
+
+    client.cookies->set(.{ "test", "wow" });
+
+    req := client->new_request(.Get, "http://api.weatherapi.com/v1/forecast.json");
+    defer req->free();
+
+    q := http.client.Query.{};
+    defer q->free();
+
+    q->set("key", "a70a42359d064c489c6175003222503");
+    q->set("q",   "Sioux Falls, SD");
+    req.url.rawQuery = q->encode();
+
+    resp := client->send(req);
+    defer resp->free();
+
+    data := resp->as_json();
+    defer delete(data);
+
+    c: current;
+    json.to_any(data.root["current"], ^c);
+
+    println(c);
+}
+
+current :: struct {
+    temp_f: f32;
+    wind_mph: f32;
+    feelslike_f: f32;
+}

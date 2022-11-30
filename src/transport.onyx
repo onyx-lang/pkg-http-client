@@ -1,0 +1,88 @@
+package http.client
+
+use core {net, io, sync}
+
+Transport_Error :: enum {
+    None;
+    Obtaining_Socket_Failed;
+    Connection_Failed;
+    Response_Parse_Failed;
+}
+
+Transport :: struct {
+    use __vtable: ^Transport_Vtable;
+
+    error: Transport_Error;
+}
+
+Transport_Vtable :: struct {
+    send_request: (^Transport, ^Request) -> ^Response;
+}
+
+
+Default_Transport :: struct {
+    use base: Transport;
+
+    initializeOnce: sync.Once;
+}
+
+default_transport := Default_Transport.{
+    Transport.{ ^default_transport_vtable },
+}
+
+default_transport_vtable := Transport_Vtable.{
+    send_request = default_send_request
+}
+
+
+#local
+default_transport_initialize :: (dt: ^Default_Transport) {
+    dt.base.error = .None;
+}
+
+#local
+default_send_request :: (t: ^Default_Transport, req: ^Request) -> ^Response {
+    // Optimizations that should be made:
+    // - Cache kept-alive sockets
+
+    if req.url.protocol == .Unknown do return null;
+
+    t.initializeOnce->exec(t, default_transport_initialize);
+
+    socket: net.Socket;
+    socket', err := net.socket_create(.Inet, .Stream);
+    defer {
+        net.socket_close(^socket);
+    }
+
+    if err != .None {
+        t.error = .Obtaining_Socket_Failed;
+        return null;
+    }
+
+    if err := socket->connect(req.url.host, ~~ req.url.port); err != .None {
+        t.error = .Connection_Failed;
+        return null;
+    }
+
+    socket->setting(.NonBlocking, 1);
+
+    r := io.reader_make(^socket);
+    w := io.writer_make(^socket);
+    defer {
+        io.reader_free(^r);
+        io.writer_free(^w);
+    }
+
+    // Write the request on the socket
+    req->write(^w);
+
+    resp := parse_response(^r);
+    if !resp {
+        t.error = .Response_Parse_Failed;
+    }
+
+    return resp;
+}
+
+
