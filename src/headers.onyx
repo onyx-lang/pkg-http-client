@@ -24,7 +24,7 @@ Headers :: #distinct ^_Headers
         h_ := cast(^_Headers) h;
         if !h_ do return;
 
-        for iter.as_iterator(^h_.headers) {
+        for iter.as_iter(^h_.headers) {
             delete(^it.value);
         }
 
@@ -40,7 +40,7 @@ Headers :: #distinct ^_Headers
 
         if cast(^_Headers) h == null do return Headers.{nh};
         
-        for iter.as_iterator(h) {
+        for iter.as_iter(h) {
             for value: it.values {
                 Headers.{nh}->add(it.header, value);
             }
@@ -122,7 +122,7 @@ Headers :: #distinct ^_Headers
         h_ := cast(^_Headers) h;
         if !h_ do return;
 
-        for entry: iter.as_iterator(^h_.headers) {
+        for entry: iter.as_iter(^h_.headers) {
 
             for value: entry.value {
                 io.write_format(w, "{}: {}", entry.key, value);
@@ -145,8 +145,8 @@ Headers :: #distinct ^_Headers
 
 
 #overload
-iter.as_iterator :: (h: Headers) => {
-    return iter.as_iterator(^(cast(^_Headers) h).headers)
+iter.as_iter :: (h: Headers) => {
+    return iter.as_iter(^(cast(^_Headers) h).headers)
         |> iter.map(x => .{ header = x.key, values = x.value });
 }
 

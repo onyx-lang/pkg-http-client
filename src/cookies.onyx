@@ -17,6 +17,7 @@ Cookie :: struct {
     domain: str;
     path: str;
 
+    // URL Encoded key and value
     uenc_key, uenc_value: str;
 }
 
@@ -45,7 +46,7 @@ Cookie :: struct {
     clone :: (c: ^CookieJar) -> CookieJar {
         new_jar := CookieJar.make();
 
-        for iter.as_iterator(^c.cookies) {
+        for iter.as_iter(^c.cookies) {
             new_jar->set(it.value);
         }
 
@@ -110,7 +111,7 @@ Cookie :: struct {
     write_header :: (c: ^CookieJar, url: Url, w: ^io.Writer) {
         if c.cookies->empty() do return;
 
-        for iter.as_iterator(^c.cookies)
+        for iter.as_iter(^c.cookies)
         {
             if #first
             {

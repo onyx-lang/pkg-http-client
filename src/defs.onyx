@@ -154,15 +154,15 @@ urldecode :: (s: str, allocator := context.allocator) -> str {
 urldecode :: (s: str, buf: [] u8) -> str {
     c := 0;
 
-    i := iter.as_iterator(s);
+    i := iter.as_iter(s);
     defer iter.close(i);
 
     for #no_close ch: i {
-        if *ch == #char "%" {
+        if ch == #char "%" {
             a, e  := iter.take_one(i, no_close=true);
             b, e' := iter.take_one(i, no_close=true);
 
-            n := u8.[*a, *b];
+            n := u8.[a, b];
 
             v := conv.parse_int(n, base=16);
             switch v {
@@ -192,11 +192,11 @@ urldecode :: (s: str, buf: [] u8) -> str {
                 }
             }
 
-        } elseif *ch == #char "+" {
+        } elseif ch == #char "+" {
             buf[c] = #char " ";
             c += 1;
         } else {
-            buf[c] = *ch;
+            buf[c] = ch;
             c += 1;
         }
     }
@@ -249,7 +249,7 @@ QueryEntry :: struct {
     remove :: (q: ^Query, key: str) {
         enc_key := urlencode(key);
 
-        for e: iter.as_iterator(^q.entries) {
+        for e: iter.as_iter(^q.entries) {
             if e.key == enc_key {
                 delete(^e.key);
                 delete(^e.value);
