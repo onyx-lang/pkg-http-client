@@ -35,6 +35,16 @@ new_request :: (method: Method, url: str) -> ^Request {
         r.cookies->set(.{ key, value });
     }
 
+    set_query :: (r: ^Request, q: ^Query) {
+        r.url.rawQuery = q->encode();
+    }
+
+    set_body :: #match {
+        (r: ^Request, body: str) {
+            r.body = body;
+        }
+    }
+
     write :: (r: ^Request, w: ^io.Writer) {
         io.write_format(w, "{} {}{} {}\r\n",
             string.as_str(r.method),
@@ -60,3 +70,12 @@ new_request :: (method: Method, url: str) -> ^Request {
         io.writer_flush(w);
     }
 }
+
+
+#if #defined(package json) {
+    #overload
+    Request.set_body :: (r: ^Request, v: json.Value) {
+        r.body = json.encode_string(v);
+    }
+}
+
