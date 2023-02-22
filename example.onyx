@@ -41,16 +41,28 @@ main :: () {
     defer resp->free();
 
     //
+    // Old way of first converting to JSON,
+    // then converting the result into a strcuture.
+    //
     // Convert the result to JSON.
-    data := resp->as_json();
-    defer delete(data);
+    // data := resp->as_json();
+    // defer delete(data);
 
     //
     // Extract the JSON data to a structure.
-    c: current;
-    json.as_any(data.root["current"], ^c);
+    // c: current;
+    // json.as_any(data.root["current"], ^c);
+
+    //
+    // New way of converting the JSON result
+    // directly into a structure and returning it.
+    c := resp->as_json_into(weather);
 
     println(c);
+}
+
+weather :: struct {
+    current: current;
 }
 
 current :: struct {

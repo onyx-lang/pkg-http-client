@@ -99,4 +99,15 @@ read_n_bytes :: (r: ^io.Reader, body: ^[..] u8, n: u32) {
 #if #defined(package json) {
     #inject
     Response.as_json :: (r: ^Response) => json.decode(r.body);
+
+    #inject
+    Response.as_json_into :: (r: ^Response, $T: type_expr) -> T {
+        data := json.decode(r.body);
+        defer json.free(data);
+
+        t: T;
+        json.as_any(data.root, ^t);
+
+        return t;
+    }
 }
