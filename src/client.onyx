@@ -17,7 +17,13 @@ Client :: struct {
     }
 
     send :: (c: ^Client, req: ^Request) -> ^Response {
-        return c.transport->send_request(req);
+        resp := c.transport->send_request(req);
+        
+        if resp.headers->has("set-cookie") {
+            c.cookies->ingress_from_headers(resp.headers);
+        }
+
+        return resp;
     }
 
     new_request :: (c: ^Client, method: Method, url: str) -> ^Request {

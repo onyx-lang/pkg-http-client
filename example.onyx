@@ -4,32 +4,51 @@
 use core
 
 main :: () {
+    //
+    // Create a client for sending requests. This is not required,
+    // but allows for customizations like custom headers, and
+    // persistent cookies.
     client := http.client.Client.{};
     defer client->free();
 
+    //
+    // Add some headers that will be attached to every request.
     client.default_headers->set("Accept", "*/*");
     client.default_headers->set("User-Agent", "onyx-http-client/0.0.1");
 
+    //
+    // Add a cookie that will be present on every request.
     client.cookies->set(.{ "test", "wow" });
 
+    //
+    // Create a new GET request for the provided API.
     req := client->new_request(.Get, "http://api.weatherapi.com/v1/forecast.json");
     defer req->free();
 
+    //
+    // Create a Query object that represents query parameters.
+    // Also, set some query paramters.
     q := http.client.Query.{};
     defer q->free();
 
-    q->set("key", "a70a42359d064c489c6175003222503");
+    q->set("key", "4668aa6e9bfa4d4b9f534936232202");
     q->set("q",   "Sioux Falls, SD");
     req.url.rawQuery = q->encode();
 
+    //
+    // Send the request.
     resp := client->send(req);
     defer resp->free();
 
+    //
+    // Convert the result to JSON.
     data := resp->as_json();
     defer delete(data);
 
+    //
+    // Extract the JSON data to a structure.
     c: current;
-    json.to_any(data.root["current"], ^c);
+    json.as_any(data.root["current"], ^c);
 
     println(c);
 }

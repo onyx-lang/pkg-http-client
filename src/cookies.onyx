@@ -85,7 +85,9 @@ Cookie :: struct {
     ingress_from_headers :: (c: ^CookieJar, h: Headers) {
         for h->values("set-cookie") {
             key_value, props := string.bisect(it, #char ";");
-            if props do core.printf("Skipping cookie props: {}\n", props);
+
+            // FIXME: This should handle parsing the domain, path, expires, etc.
+            // if props do core.printf("Skipping cookie props: {}\n", props);
 
             key, value := string.bisect(key_value, #char "=");
 

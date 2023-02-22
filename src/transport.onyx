@@ -63,8 +63,6 @@ default_send_request :: (t: ^Default_Transport, req: ^Request) -> ^Response {
         return null;
     }
 
-    socket->setting(.NonBlocking, 1);
-
     r := io.reader_make(^socket);
     w := io.writer_make(^socket);
     defer {

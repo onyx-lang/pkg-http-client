@@ -73,7 +73,14 @@ Headers :: #distinct ^_Headers
             array.free(headers);
         }
 
-        h_.headers->delete(header);
+        h_.headers->delete(cheader);
+    }
+
+    has :: (h: Headers, header: str) -> bool {
+        h_ := cast(^_Headers) h;
+
+        cheader := canonicalize_header_temp(header);
+        return h_.headers->has(cheader);
     }
 
     get :: (h: Headers, header: str) -> str {
