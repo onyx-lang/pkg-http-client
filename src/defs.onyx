@@ -268,10 +268,6 @@ QueryEntry :: struct {
 
         res: [..] u8;
         for^ q.entries {
-            if #first {
-                string.concat(^res, "?");
-            }
-
             string.concat(^res, it.key, "=", it.value, "&");
         }
 

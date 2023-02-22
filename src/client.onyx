@@ -33,12 +33,24 @@ Client :: struct {
         return req;
     }
 
-    get :: (c: ^Client, url: str) -> ^Response {
-        req := new_request(.Get, url);
+    get :: #match {
+        (c: ^Client, url: str, query: ^Query = null) -> ^Response {
+            req := new_request(.Get, url);
+            defer req->free();
 
-        defer req->free();
+            if query do req.url.rawQuery = query->encode();
 
-        return c->send(req);
+            return c->send(req);
+        },
+
+        (c: ^Client, url: str, query_params: [] struct {key, value: str}) -> ^Response {
+            q := Query.{};
+            defer q->free();
+
+            for ^ query_params do q->set(it.key, it.value);
+
+            return c->get(url, ^q);
+        },
     }
 
     post :: (c: ^Client, url: str, content_type: str, data: [] u8) -> ^Response {

@@ -46,11 +46,15 @@ new_request :: (method: Method, url: str) -> ^Request {
     }
 
     write :: (r: ^Request, w: ^io.Writer) {
-        io.write_format(w, "{} {}{} {}\r\n",
+        io.write_format(w, "{} {}",
             string.as_str(r.method),
-            r.url.resource,
-            r.url.rawQuery,
-            string.as_str(r.url.protocol));
+            r.url.resource);
+        
+        if r.url.rawQuery {
+            io.write_format(w, "?{}", r.url.rawQuery);
+        }
+
+        io.write_format(w, " {}\r\n", string.as_str(r.url.protocol));
 
         io.write_format(w, "Host: {}\r\n", r.url.host);
 
