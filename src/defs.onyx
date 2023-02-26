@@ -205,12 +205,11 @@ urldecode :: (s: str, buf: [] u8) -> str {
 }
 
 Query :: struct {
-    entries: [..] QueryEntry;
+    entries: [..] QueryParam;
     encoded: str;
 }
 
-#local
-QueryEntry :: struct {
+QueryParam :: struct {
     key, value: str; 
 }
 

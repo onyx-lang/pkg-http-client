@@ -34,7 +34,7 @@ Client :: struct {
     }
 
     get :: #match {
-        (c: ^Client, url: str, query_params: [] struct {key, value: str}) -> ^Response {
+        (c: ^Client, url: str, query_params: [] QueryParam) -> ^Response {
             q := Query.{};
             defer q->free();
 
@@ -76,25 +76,17 @@ default_client: Client;
 get :: #match #local {}
 
 #overload
-get :: (url: str, query_params: [] struct {key, value: str}) -> ^Response {
-    q := Query.{};
-    defer q->free();
+get :: (url: str, query_params: [] QueryParam) -> ^Response {
+    default_client_init_once->exec(init_default_client);
 
-    for ^ query_params do q->set(it.key, it.value);
-
-    return get(url, ^q);
+    return default_client->get(url, query_params);
 }
 
 #overload
 get :: (url: str, query: ^Query = null) -> ^Response {
     default_client_init_once->exec(init_default_client);
 
-    req := default_client->new_request(.Get, url);
-    defer req->free();
-
-    if query do req.url.rawQuery = query->encode();
-
-    return default_client->send(req);
+    return default_client->get(url, query);
 }
 
 post :: (url: str, content_type: str, data: [] u8) -> ^Response {
