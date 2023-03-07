@@ -13,6 +13,9 @@ main :: () {
     client := http.client.Client.{};
     defer client->free();
 
+    client.default_headers->add("user-agent", "onyx-http/0.1.1");
+    client.default_headers->add("user-agent", "onyx-http/0.1.2");
+
     {
         resp := client->get("https://httpbin.org/cookies/set", .[
             .{"freeform", "ASDF"},
@@ -26,6 +29,12 @@ main :: () {
 
     {
         resp := client->get("https://httpbin.org/cookies");
+        defer resp->free();
+        printf("{*}\n", resp);
+    }
+
+    {
+        resp := client->get("https://httpbin.org/get");
         defer resp->free();
         printf("{*}\n", resp);
     }
