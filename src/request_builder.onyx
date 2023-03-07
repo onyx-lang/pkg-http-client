@@ -1,0 +1,126 @@
+package http.client
+
+
+RequestBuilder :: #distinct &_RequestBuilder
+
+#local
+_RequestBuilder :: struct {
+    client: &Client;
+    query: Query;
+    request: &Request;
+
+    // TODO: Keep track of allocator used to allocate this string.
+    body_to_free: str;
+}
+
+request_builder :: (client: &Client) -> RequestBuilder {
+    r := new(_RequestBuilder);
+
+    r.client = client;
+    r.query = .{};
+    r.request = client->new_request();
+
+    return RequestBuilder.{r};
+}
+
+#inject RequestBuilder {
+    set_method :: (rb: RequestBuilder, method: Method) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request->set_method(method);
+        return rb;
+    }
+
+    set_url :: (rb: RequestBuilder, url: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request->set_url(url);
+        return rb;
+    }
+
+    set_header :: (rb: RequestBuilder, header: str, value: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.headers->set(header, value);
+        return rb;
+    }
+
+    add_header :: (rb: RequestBuilder, header: str, value: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.headers->add(header, value);
+        return rb;
+    }
+
+    delete_header :: (rb: RequestBuilder, header: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.headers->delete(header);
+        return rb;
+    }
+
+    set_cookie :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.cookies->set(.{key, value});
+        return rb;
+    }
+
+    set_query :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.query->set(key, value);
+        return rb;
+    }
+
+    set_body :: #match {
+        (rb: RequestBuilder, body: $T) -> RequestBuilder {
+            r := cast(&_RequestBuilder, rb);
+            r.request->set_body(body);
+            return rb;
+        }
+    }
+
+
+    cleanup :: (rb: RequestBuilder) {
+        r := cast(&_RequestBuilder, rb);
+        r.query->free();
+        r.request->free();
+
+        if r.body_to_free {
+            delete(^r.body_to_free);
+        }
+
+        cfree(r);
+    }
+
+    prepare :: (rb: RequestBuilder) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request->set_query(&r.query);
+        return rb;
+    }
+
+    send :: (rb: RequestBuilder) -> &Response {
+        rb->prepare();
+
+        r := cast(&_RequestBuilder, rb);
+
+        // Send the request!
+        resp := r.client->send(r.request);
+
+        rb->cleanup();
+        return resp;
+    }
+}
+
+
+#if #defined(package json) {
+    #inject
+    RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+
+        // This almost always requires json.Use_Any_Encoder to be true.
+        // But that may be true by default soon anyway.
+        json_string := json.encode_string(v);
+
+        r.body_to_free = json_string;
+        r.request->set_body(json_string);
+        r.request.headers->set("content-type", "application/json");
+
+        return rb;
+    }
+}
+

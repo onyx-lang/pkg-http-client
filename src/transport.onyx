@@ -4,13 +4,13 @@ use core {net, io, sync, map, Pair, alloc}
 use openssl
 
 Transport :: struct {
-    use __vtable: ^Transport_Vtable;
+    use __vtable: &Transport_Vtable;
 
     error: Transport_Error;
 }
 
 Transport_Vtable :: struct {
-    send_request: (^Transport, ^Request) -> ^Response;
+    send_request: (&Transport, &Request) -> &Response;
 }
 
 Transport_Error :: enum {
@@ -24,8 +24,8 @@ Transport_Error :: enum {
 
 
 Default_Transport_Connection :: struct {
-    socket: net.Socket;
-    ssl: Optional(SSL);
+    socket : net.Socket;
+    ssl    : ? SSL;
 }
 
 #inject Default_Transport_Connection {
@@ -34,8 +34,7 @@ Default_Transport_Connection :: struct {
             return &dtc.socket;
         }
 
-        ssl := dtc.ssl->unwrap();
-        return alloc.on_temp(SSL_Stream.make(ssl));
+        return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
     }
 }
 
@@ -49,7 +48,7 @@ Default_Transport :: struct {
 }
 
 default_transport := Default_Transport.{
-    Transport.{ ^default_transport_vtable },
+    Transport.{ &default_transport_vtable },
 }
 
 default_transport_vtable := Transport_Vtable.{
@@ -58,9 +57,9 @@ default_transport_vtable := Transport_Vtable.{
 
 
 #local
-default_transport_initialize :: (dt: ^Default_Transport) {
+default_transport_initialize :: (dt: &Default_Transport) {
     dt.base.error = .None;
-    map.init(^dt.open_sockets);
+    map.init(&dt.open_sockets);
 
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, .{});
 
@@ -76,11 +75,11 @@ default_transport_initialize :: (dt: ^Default_Transport) {
 }
 
 #local
-default_transport_close_connection :: (dt: ^Default_Transport, host: str, is_ssl: bool) {
-    conn := ^dt.open_sockets[.{host, is_ssl}];
+default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl: bool) {
+    conn := &dt.open_sockets[.{host, is_ssl}];
     if !conn do return;
 
-    net.socket_close(^conn.socket);
+    net.socket_close(&conn.socket);
     
     if conn.ssl {
         ssl := conn.ssl->unwrap();
@@ -111,7 +110,7 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
             res := v;
             if cast(u64, res) == 0 {
                 // TODO: Better error reporting
-                // Maybe use Result(^Response, str) type?
+                // Maybe use Result(&Response, str) type?
                 t.error = .SSL_Error;
                 return return .{};
             }
@@ -136,7 +135,7 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
             return .{};
         }
 
-        tc.ssl = Optional.make(ssl);
+        tc.ssl->set(ssl);
     }
 
     return Optional.make(tc);
@@ -146,13 +145,13 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
 default_send :: (t: &Default_Transport, conn: &Default_Transport_Connection, req: &Request) -> bool {
     stream := conn->as_stream();
     w := io.writer_make(stream);
-    defer io.writer_free(^w);
+    defer io.writer_free(&w);
 
-    return req->write(^w);
+    return req->write(&w);
 }
 
 #local
-default_send_request :: (t: ^Default_Transport, req: ^Request) -> ^Response {
+default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
     // Optimizations that should be made:
     // - Don't read the whole body right away
 
@@ -206,9 +205,9 @@ default_send_request :: (t: ^Default_Transport, req: ^Request) -> ^Response {
     // SSL socket, or the normal TCP socket.
     conn   := &t.open_sockets[location];
     r      := io.reader_make(conn->as_stream());
-    defer io.reader_free(^r);
+    defer io.reader_free(&r);
 
-    resp := parse_response(^r);
+    resp := parse_response(&r);
     if !resp {
         t.error = .Response_Parse_Failed;
 

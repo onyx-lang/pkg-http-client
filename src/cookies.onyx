@@ -32,35 +32,35 @@ Cookie :: struct {
     }
 
     #doc """ TODO """
-    free :: (c: ^CookieJar) {
-        delete(^c.cookies);
+    free :: (c: &CookieJar) {
+        delete(&c.cookies);
         c.string_pool->free();
     }
 
     #doc """ TODO """
-    clear :: (c: ^CookieJar) {
+    clear :: (c: &CookieJar) {
         c.cookies->clear();
         c.string_pool->flush();
     }
 
-    clone :: (c: ^CookieJar) -> CookieJar {
+    clone :: (c: &CookieJar) -> CookieJar {
         new_jar := CookieJar.make();
 
-        for iter.as_iter(^c.cookies) {
+        for iter.as_iter(&c.cookies) {
             new_jar->set(it.value);
         }
 
         return new_jar;
     }
 
-    set :: (c: ^CookieJar, cookie: Cookie) {
+    set :: (c: &CookieJar, cookie: Cookie) {
         new_cookie := cookie;
         new_cookie.key   = c.string_pool->add(new_cookie.key);
         new_cookie.value = c.string_pool->add(new_cookie.value);
 
         if !new_cookie.uenc_key {
             encoded_key := urlencode(new_cookie.key);
-            defer delete(^encoded_key);
+            defer delete(&encoded_key);
 
             new_cookie.uenc_key = c.string_pool->add(encoded_key);
 
@@ -70,7 +70,7 @@ Cookie :: struct {
 
         if !new_cookie.uenc_value {
             encoded_value := urlencode(new_cookie.value);
-            defer delete(^encoded_value);
+            defer delete(&encoded_value);
 
             new_cookie.uenc_value = c.string_pool->add(encoded_value);
 
@@ -82,7 +82,7 @@ Cookie :: struct {
     }
 
     #doc """ TODO """
-    ingress_from_headers :: (c: ^CookieJar, h: Headers) {
+    ingress_from_headers :: (c: &CookieJar, h: Headers) {
         for h->values("set-cookie") {
             key_value, props := string.bisect(it, #char ";");
 
@@ -110,10 +110,10 @@ Cookie :: struct {
     }
 
     #doc """ TODO """
-    write_header :: (c: ^CookieJar, url: Url, w: ^io.Writer) {
+    write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
         if c.cookies->empty() do return;
 
-        for iter.as_iter(^c.cookies)
+        for iter.as_iter(&c.cookies)
         {
             if #first
             {

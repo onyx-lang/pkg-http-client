@@ -64,7 +64,7 @@ Url :: struct {
     into its component parts. The host and resource string are sub-strings
     of the provided string, and therefore share the lifetime of the provided string.
 """
-destructure_url :: (url: str) -> Url {
+destructure_url :: (url: str) -> ?Url {
     protocol := Protocol.Unknown;
     host := "";
     port := 80;
@@ -75,7 +75,7 @@ destructure_url :: (url: str) -> Url {
     u', query    := string.bisect(u, #char "?");
 
     if string.contains(u, "://") {
-        switch v := string.read_until(^u, #char ":"); v {
+        switch v := string.read_until(&u, #char ":"); v {
             case "http" {
                 // Assuming HTTP/1.1 when using 'http' protocol
                 protocol = .HTTP11;
@@ -87,10 +87,10 @@ destructure_url :: (url: str) -> Url {
             }
         }
 
-        string.advance(^u, 3);
+        string.advance(&u, 3);
     }
 
-    host_and_port := string.read_until(^u, #char "/");
+    host_and_port := string.read_until(&u, #char "/");
     if string.contains(host_and_port, #char "@") {
         // Currently, basic authentication in URL is not allowed.
         // I.e.  http://user:pass@host:port/
@@ -104,7 +104,9 @@ destructure_url :: (url: str) -> Url {
 
     if u do resource = u;
 
-    return .{ protocol, host, port, resource, query, fragment };
+    return Optional.make(
+        Url.{ protocol, host, port, resource, query, fragment }
+    );
 }
 
 
@@ -220,14 +222,14 @@ QueryParam :: struct {
 }
 
 #inject Query {
-    set :: (q: ^Query, key, value: str) {
+    set :: (q: &Query, key, value: str) {
         enc_key   := urlencode(key);
         enc_value := urlencode(value);
 
-        for^ e: q.entries {
+        for& e: q.entries {
             if e.key == enc_key {
-                delete(^e.value);
-                delete(^enc_key);
+                delete(&e.value);
+                delete(&enc_key);
                 
                 e.value = enc_value;
                 return;
@@ -239,41 +241,41 @@ QueryParam :: struct {
         };
     }
 
-    free :: (q: ^Query) {
-        for^ e: q.entries {
-            delete(^e.key);
-            delete(^e.value);
+    free :: (q: &Query) {
+        for& e: q.entries {
+            delete(&e.key);
+            delete(&e.value);
         }
-        delete(^q.entries);
+        delete(&q.entries);
 
         if q.encoded {
-            delete(^q.encoded);
+            delete(&q.encoded);
         }
     }
 
-    remove :: (q: ^Query, key: str) {
+    remove :: (q: &Query, key: str) {
         enc_key := urlencode(key);
 
-        for e: iter.as_iter(^q.entries) {
+        for e: iter.as_iter(&q.entries) {
             if e.key == enc_key {
-                delete(^e.key);
-                delete(^e.value);
+                delete(&e.key);
+                delete(&e.value);
                 #remove;
                 break;
             }
         }
 
-        delete(^enc_key);
+        delete(&enc_key);
     }
 
-    encode :: (q: ^Query) -> str {
+    encode :: (q: &Query) -> str {
         if q.encoded {
-            delete(^q.encoded);
+            delete(&q.encoded);
         }
 
         res: [..] u8;
-        for^ q.entries {
-            string.concat(^res, it.key, "=", it.value, "&");
+        for& q.entries {
+            string.concat(&res, it.key, "=", it.value, "&");
         }
 
         if res[res.count - 1] == #char "&" {

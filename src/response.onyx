@@ -10,18 +10,20 @@ Response :: struct {
 }
 
 #inject Response {
-    free :: (r: ^Response) {
+    make :: () => new(#Self);
+
+    free :: (r: &Response) {
         if r == null do return;
 
         r.headers->free();
-        delete(^r.body);
+        delete(&r.body);
         cfree(r);
     }
 }
 
 #package
-parse_response :: (r: ^io.Reader) -> ^Response {
-    resp := new(Response);
+parse_response :: (r: &io.Reader) -> &Response {
+    resp := Response.make();
 
     status_line := r->read_line(consume_newline=true, inplace=true);
     protocol, status_line' := string.bisect(status_line, #char " ");
@@ -38,25 +40,25 @@ parse_response :: (r: ^io.Reader) -> ^Response {
 
     while true {
         line := r->read_line(consume_newline=true);
-        defer delete(^line);
+        defer delete(&line);
         if line == "\r\n" do break;
 
         key, value := string.bisect(line, #char ":");
-        string.advance(^value, 1);
-        string.strip_trailing_whitespace(^value);
+        string.advance(&value, 1);
+        string.strip_trailing_whitespace(&value);
 
         resp.headers->add(key, string.temp_copy(value));
     }
 
     body: [..] u8;
     if resp.headers->get("transfer-encoding") == "chunked" {
-        read_chunked_body(r, ^body);
+        read_chunked_body(r, &body);
 
     } else {
         content_length: u32 = ~~ conv.parse_int(resp.headers->get("content-length"));
 
         if content_length > 0 {
-            read_simple_body(r, ^body, content_length);
+            read_simple_body(r, &body, content_length);
         }
     }
 
@@ -66,7 +68,7 @@ parse_response :: (r: ^io.Reader) -> ^Response {
 }
 
 #local
-read_chunked_body :: (r: ^io.Reader, body: ^[..] u8) {
+read_chunked_body :: (r: &io.Reader, body: &[..] u8) {
     while true {
         line := r->read_line(consume_newline=true, inplace=true);
         chunk_size := cast(u32) conv.parse_int(line, base=16);
@@ -80,13 +82,13 @@ read_chunked_body :: (r: ^io.Reader, body: ^[..] u8) {
 }
 
 #local
-read_simple_body :: (r: ^io.Reader, body: ^[..] u8, content_length: u32) {
+read_simple_body :: (r: &io.Reader, body: &[..] u8, content_length: u32) {
     array.ensure_capacity(body, content_length);
     read_n_bytes(r, body, content_length);
 }
 
 #local
-read_n_bytes :: (r: ^io.Reader, body: ^[..] u8, n: u32) {
+read_n_bytes :: (r: &io.Reader, body: &[..] u8, n: u32) {
     to_read := n;
     while to_read > 0 {
         bytes_read, err := r->read_bytes(body.data[body.count .. body.count + to_read]);
@@ -98,15 +100,15 @@ read_n_bytes :: (r: ^io.Reader, body: ^[..] u8, n: u32) {
 
 #if #defined(package json) {
     #inject
-    Response.as_json :: (r: ^Response) => json.decode(r.body);
+    Response.as_json :: (r: &Response) => json.decode(r.body);
 
     #inject
-    Response.as_json_into :: (r: ^Response, $T: type_expr) -> T {
+    Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
         data := json.decode(r.body);
         defer json.free(data);
 
         t: T;
-        json.as_any(data.root, ^t);
+        json.as_any(data.root, &t);
 
         return t;
     }

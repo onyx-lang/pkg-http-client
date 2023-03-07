@@ -4,6 +4,7 @@
 #library_path "./bin"
 
 use core
+#inject json.Use_Any_Encoder :: true
 
 main :: () {
     //
@@ -14,15 +15,28 @@ main :: () {
     defer client->free();
 
     client.default_headers->add("user-agent", "onyx-http/0.1.1");
-    client.default_headers->add("user-agent", "onyx-http/0.1.2");
 
     {
         resp := client->get("https://httpbin.org/cookies/set", .[
-            .{"freeform", "ASDF"},
-            .{"onyx", "iscool"},
-            .{"http", "ishard"},
-            .{"s p a c e s", "a r e h a r d t o o"},
+            .{ "freeform", "ASDF" },
+            .{ "onyx", "iscool" },
+            .{ "http", "ishard" },
+            .{ "s p a c e s", "a r e h a r d t o o" },
         ]);
+        defer resp->free();
+        printf("{*}\n", resp);
+    }
+
+    {
+        resp := http.client.request_builder(&client)
+                ->set_url("https://httpbin.org/post")
+                ->set_method(.Post)
+                ->set_query("query", "work")
+                ->set_body_json(.{
+                    wow = "This worked!"
+                })
+                ->send();
+
         defer resp->free();
         printf("{*}\n", resp);
     }
@@ -34,7 +48,7 @@ main :: () {
     }
 
     {
-        resp := client->get("https://httpbin.org/get");
+        resp := client->get("https://httpbin.org/get", .[.{"arg", "1"}]);
         defer resp->free();
         printf("{*}\n", resp);
     }

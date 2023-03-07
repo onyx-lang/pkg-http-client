@@ -11,8 +11,17 @@ Request :: struct {
     cookies: CookieJar;
 }
 
-new_request :: (method: Method, url: str) -> ^Request {
-    u := destructure_url(url);
+//
+// DO NOT USE THIS REQUEST CREATION METHOD UNLESS YOU KNOW
+// WHAT YOU ARE DOING.
+//
+// Use Client->new_request() instead.
+//
+new_request :: #match #local {}
+
+#overload
+new_request :: (method: Method, url: str) -> &Request {
+    u := destructure_url(url)?;
 
     return alloc.on_heap(Request.{
         method = method,
@@ -20,8 +29,14 @@ new_request :: (method: Method, url: str) -> ^Request {
     });
 }
 
+#overload
+new_request :: () -> &Request {
+    return alloc.on_heap(Request.{});
+}
+
+
 #inject Request {
-    free :: (r: ^Request) {
+    free :: (r: &Request) {
         r.headers->free();
         r.cookies->free();
 
@@ -31,21 +46,32 @@ new_request :: (method: Method, url: str) -> ^Request {
         cfree(r);
     }
 
-    set_cookie :: (r: ^Request, key, value: str) {
+    set_url :: (r: &Request, url: str) {
+        u := destructure_url(url);
+        if u {
+            r.url = u->unwrap();
+        }
+    }
+
+    set_method :: (r: &Request, method: Method) {
+        r.method = method;
+    }
+
+    set_cookie :: (r: &Request, key, value: str) {
         r.cookies->set(.{ key, value });
     }
 
-    set_query :: (r: ^Request, q: ^Query) {
+    set_query :: (r: &Request, q: &Query) {
         r.url.rawQuery = q->encode();
     }
 
     set_body :: #match {
-        (r: ^Request, body: str) {
+        (r: &Request, body: str) {
             r.body = body;
         }
     }
 
-    write :: (r: ^Request, w: ^io.Writer) -> bool {
+    write :: (r: &Request, w: &io.Writer) -> bool {
         io.writer_consume_error(w);
 
         io.write_format(w, "{} {}",
@@ -82,7 +108,7 @@ new_request :: (method: Method, url: str) -> ^Request {
 
 #if #defined(package json) {
     #overload
-    Request.set_body :: (r: ^Request, v: json.Value) {
+    Request.set_body :: (r: &Request, v: json.Value) {
         r.body = json.encode_string(v);
     }
 }

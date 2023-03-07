@@ -3,7 +3,7 @@ package http.client
 use core {sync}
 
 Client :: struct {
-    transport: ^Transport = ^default_transport;
+    transport: &Transport = &default_transport;
 
     default_headers: Headers = Headers.make();
 
@@ -11,12 +11,12 @@ Client :: struct {
 }
 
 #inject Client {
-    free :: (c: ^Client) {
+    free :: (c: &Client) {
         c.default_headers->free();
         c.cookies->free();
     }
 
-    send :: (c: ^Client, req: ^Request) -> ^Response {
+    send :: (c: &Client, req: &Request) -> &Response {
         resp := c.transport->send_request(req);
         if !resp do return resp;
         
@@ -27,24 +27,33 @@ Client :: struct {
         return resp;
     }
 
-    new_request :: (c: ^Client, method: Method, url: str) -> ^Request {
-        req := http.client.new_request(method, url);
-        req.headers = c.default_headers->clone();
-        req.cookies = c.cookies->clone();
-        return req;
+    new_request :: #match {
+        (c: &Client) -> &Request {
+            req := http.client.new_request();
+            req.headers = c.default_headers->clone();
+            req.cookies = c.cookies->clone();
+            return req;
+        },
+
+        (c: &Client, method: Method, url: str) -> &Request {
+            req := http.client.new_request(method, url);
+            req.headers = c.default_headers->clone();
+            req.cookies = c.cookies->clone();
+            return req;
+        }
     }
 
     get :: #match {
-        (c: ^Client, url: str, query_params: [] QueryParam) -> ^Response {
+        (c: &Client, url: str, query_params: [] QueryParam) -> &Response {
             q := Query.{};
             defer q->free();
 
-            for ^ query_params do q->set(it.key, it.value);
+            for & query_params do q->set(it.key, it.value);
 
-            return c->get(url, ^q);
+            return c->get(url, &q);
         },
 
-        (c: ^Client, url: str, query: ^Query = null) -> ^Response {
+        (c: &Client, url: str, query: &Query = null) -> &Response {
             req := c->new_request(.Get, url);
             defer req->free();
 
@@ -54,7 +63,7 @@ Client :: struct {
         },
     }
 
-    post :: (c: ^Client, url: str, content_type: str, data: [] u8) -> ^Response {
+    post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
         req := c->new_request(.Post, url);
         req.headers->set("content-type", content_type);
         req.body = data;
@@ -77,20 +86,20 @@ default_client: Client;
 get :: #match #local {}
 
 #overload
-get :: (url: str, query_params: [] QueryParam) -> ^Response {
+get :: (url: str, query_params: [] QueryParam) -> &Response {
     default_client_init_once->exec(init_default_client);
 
     return default_client->get(url, query_params);
 }
 
 #overload
-get :: (url: str, query: ^Query = null) -> ^Response {
+get :: (url: str, query: &Query = null) -> &Response {
     default_client_init_once->exec(init_default_client);
 
     return default_client->get(url, query);
 }
 
-post :: (url: str, content_type: str, data: [] u8) -> ^Response {
+post :: (url: str, content_type: str, data: [] u8) -> &Response {
     default_client_init_once->exec(init_default_client);
 
     return default_client->post(url, content_type, data);

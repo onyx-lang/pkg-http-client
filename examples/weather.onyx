@@ -54,7 +54,7 @@ main :: () {
     //
     // Extract the JSON data to a structure.
     // c: current;
-    // json.as_any(data.root["current"], ^c);
+    // json.as_any(data.root["current"], &c);
 
     //
     // New way of converting the JSON result
