@@ -130,12 +130,9 @@ Headers :: #distinct ^_Headers
         if !h_ do return;
 
         for entry: iter.as_iter(^h_.headers) {
-
             for value: entry.value {
                 io.write_format(w, "{}: {}\r\n", entry.key, value);
             }
-
-            io.write(w, "\r\n");
         }
     }
 
