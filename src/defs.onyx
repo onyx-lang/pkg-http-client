@@ -35,13 +35,14 @@ Protocol :: enum {
     Unknown;
     HTTP10;
     HTTP11;
+    HTTPS11;
 }
 
 #inject Protocol {
     as_str :: (p: Protocol) => {
         switch p {
-            case .HTTP10 do return "HTTP/1.0";
-            case .HTTP11 do return "HTTP/1.1";
+            case .HTTP10           do return "HTTP/1.0";
+            case .HTTP11, .HTTPS11 do return "HTTP/1.1";
         }
 
         return "";
@@ -59,7 +60,7 @@ Url :: struct {
 
 
 #doc """
-    Breaks down a url of the form, `(http://)host(:port)/resource[?query][#fragment]`,
+    Breaks down a url of the form, `(https?://)host(:port)/resource[?query][#fragment]`,
     into its component parts. The host and resource string are sub-strings
     of the provided string, and therefore share the lifetime of the provided string.
 """
@@ -74,10 +75,15 @@ destructure_url :: (url: str) -> Url {
     u', query    := string.bisect(u, #char "?");
 
     if string.contains(u, "://") {
-        switch string.read_until(^u, #char ":") {
+        switch v := string.read_until(^u, #char ":"); v {
             case "http" {
                 // Assuming HTTP/1.1 when using 'http' protocol
                 protocol = .HTTP11;
+            }
+            
+            case "https" {
+                protocol = .HTTPS11;
+                port = 443;
             }
         }
 

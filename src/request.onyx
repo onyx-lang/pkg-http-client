@@ -45,7 +45,9 @@ new_request :: (method: Method, url: str) -> ^Request {
         }
     }
 
-    write :: (r: ^Request, w: ^io.Writer) {
+    write :: (r: ^Request, w: ^io.Writer) -> bool {
+        io.writer_consume_error(w);
+
         io.write_format(w, "{} {}",
             string.as_str(r.method),
             r.url.resource);
@@ -72,6 +74,8 @@ new_request :: (method: Method, url: str) -> ^Request {
         }
 
         io.writer_flush(w);
+
+        return io.writer_consume_error(w) == .None;
     }
 }
 

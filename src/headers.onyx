@@ -42,7 +42,7 @@ Headers :: #distinct ^_Headers
         
         for iter.as_iter(h) {
             for value: it.values {
-                Headers.{nh}->add(it.header, value);
+                (Headers.{nh})->add(it.header, value);
             }
         }
 

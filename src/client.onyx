@@ -18,6 +18,7 @@ Client :: struct {
 
     send :: (c: ^Client, req: ^Request) -> ^Response {
         resp := c.transport->send_request(req);
+        if !resp do return resp;
         
         if resp.headers->has("set-cookie") {
             c.cookies->ingress_from_headers(resp.headers);
@@ -44,7 +45,7 @@ Client :: struct {
         },
 
         (c: ^Client, url: str, query: ^Query = null) -> ^Response {
-            req := new_request(.Get, url);
+            req := c->new_request(.Get, url);
             defer req->free();
 
             if query do req.url.rawQuery = query->encode();
@@ -54,7 +55,7 @@ Client :: struct {
     }
 
     post :: (c: ^Client, url: str, content_type: str, data: [] u8) -> ^Response {
-        req := new_request(.Post, url);
+        req := c->new_request(.Post, url);
         req.headers->set("content-type", content_type);
         req.body = data;
 

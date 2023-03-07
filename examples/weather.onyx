@@ -1,6 +1,8 @@
 #load "./module"
 #load "./../json/module"
 
+#library_path "./bin"
+
 use core
 
 main :: () {
@@ -22,7 +24,7 @@ main :: () {
 
     //
     // Create a new GET request for the provided API.
-    req := client->new_request(.Get, "http://api.weatherapi.com/v1/forecast.json");
+    req := client->new_request(.Get, "https://api.weatherapi.com/v1/forecast.json");
     defer req->free();
 
     //
@@ -31,13 +33,14 @@ main :: () {
     q := http.client.Query.{};
     defer q->free();
 
-    q->set("key", "4668aa6e9bfa4d4b9f534936232202");
-    q->set("q",   "Sioux Falls, SD");
+    q->set("key", "API KEY HERE");
+    q->set("q",   "London, UK");
     req.url.rawQuery = q->encode();
 
     //
     // Send the request.
     resp := client->send(req);
+    println(resp.status);
     defer resp->free();
 
     //

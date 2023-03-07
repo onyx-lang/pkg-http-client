@@ -1,13 +1,7 @@
 package http.client
 
-use core {net, io, sync}
-
-Transport_Error :: enum {
-    None;
-    Obtaining_Socket_Failed;
-    Connection_Failed;
-    Response_Parse_Failed;
-}
+use core {net, io, sync, map, Pair, alloc}
+use openssl
 
 Transport :: struct {
     use __vtable: ^Transport_Vtable;
@@ -19,11 +13,39 @@ Transport_Vtable :: struct {
     send_request: (^Transport, ^Request) -> ^Response;
 }
 
+Transport_Error :: enum {
+    None;
+    Obtaining_Socket_Failed;
+    Connection_Failed;
+    Response_Parse_Failed;
+    SSL_Error;
+}
+
+
+
+Default_Transport_Connection :: struct {
+    socket: net.Socket;
+    ssl: Optional(SSL);
+}
+
+#inject Default_Transport_Connection {
+    as_stream :: (dtc: &#Self) -> &io.Stream {
+        if !dtc.ssl {
+            return &dtc.socket;
+        }
+
+        ssl := dtc.ssl->unwrap();
+        return alloc.on_temp(SSL_Stream.make(ssl));
+    }
+}
 
 Default_Transport :: struct {
     use base: Transport;
 
     initializeOnce: sync.Once;
+
+    ssl_ctx: SSL_CTX;
+    open_sockets: Map(Pair(str, bool), Default_Transport_Connection);
 }
 
 default_transport := Default_Transport.{
@@ -38,44 +60,162 @@ default_transport_vtable := Transport_Vtable.{
 #local
 default_transport_initialize :: (dt: ^Default_Transport) {
     dt.base.error = .None;
+    map.init(^dt.open_sockets);
+
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, .{});
+
+    dt.ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if cast(u64, dt.ssl_ctx) == 0 {
+        return;
+    }
+
+    SSL_CTX_set_verify(dt.ssl_ctx, SSL_VERIFY_PEER, null);
+    SSL_CTX_set_verify_depth(dt.ssl_ctx, 4);
+    SSL_CTX_set_options(dt.ssl_ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+    SSL_CTX_set_default_verify_paths(dt.ssl_ctx);
+}
+
+#local
+default_transport_close_connection :: (dt: ^Default_Transport, host: str, is_ssl: bool) {
+    conn := ^dt.open_sockets[.{host, is_ssl}];
+    if !conn do return;
+
+    net.socket_close(^conn.socket);
+    
+    if conn.ssl {
+        ssl := conn.ssl->unwrap();
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+    }
+}
+
+#local
+default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> ? Default_Transport_Connection {
+    err: #auto;
+
+    tc: Default_Transport_Connection;
+    tc.socket, err = net.socket_create(.Inet, .Stream);
+
+    if err != .None {
+        t.error = .Obtaining_Socket_Failed;
+        return .{};
+    }
+
+    if err := tc.socket->connect(req.url.host, ~~ req.url.port); err != .None {
+        t.error = .Connection_Failed;
+        return .{};
+    }
+
+    if use_https {
+        try :: macro (v: $T) -> T {
+            res := v;
+            if cast(u64, res) == 0 {
+                // TODO: Better error reporting
+                // Maybe use Result(^Response, str) type?
+                t.error = .SSL_Error;
+                return return .{};
+            }
+
+            return res;
+        }
+
+        ssl := try(SSL_new(t.ssl_ctx));
+        bio := try(BIO_new_socket(cast(u32, tc.socket.handle), BIO_NOCLOSE));
+        SSL_set_bio(ssl, bio, bio);
+
+        try(SSL_ctrl(ssl,
+                SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                ~~ TLSEXT_NAMETYPE_host_name,
+                core.tprintf("{}\x00", req.url.host).data));
+        
+        handshake_result := SSL_connect(ssl);
+        if handshake_result <= 0 {
+            err := SSL_get_error(ssl, handshake_result);
+            log(.Error, "HTTPS", core.tprintf("SSL Error: code {}", err));
+            t.error = .SSL_Error;
+            return .{};
+        }
+
+        tc.ssl = Optional.make(ssl);
+    }
+
+    return Optional.make(tc);
+}
+
+#local
+default_send :: (t: &Default_Transport, conn: &Default_Transport_Connection, req: &Request) -> bool {
+    stream := conn->as_stream();
+    w := io.writer_make(stream);
+    defer io.writer_free(^w);
+
+    return req->write(^w);
 }
 
 #local
 default_send_request :: (t: ^Default_Transport, req: ^Request) -> ^Response {
     // Optimizations that should be made:
-    // - Cache kept-alive sockets
     // - Don't read the whole body right away
 
     if req.url.protocol == .Unknown do return null;
-
     t.initializeOnce->exec(t, default_transport_initialize);
 
-    socket, err := net.socket_create(.Inet, .Stream);
-    defer net.socket_close(^socket);
+    use_https := req.url.protocol == .HTTPS11;
+    location := Pair.make(req.url.host, use_https);
 
-    if err != .None {
-        t.error = .Obtaining_Socket_Failed;
-        return null;
+    //
+    // This flag is true when a new socket connection needs to be created,
+    // and the request needs to be sent from it. It starts as false, because
+    // *optimistically*, there will already be an open connection we can reuse.
+    need_new_socket := false;
+
+    if !t.open_sockets->has(location) {
+        //
+        // If there is no already open connection, we need to make a new one.
+        need_new_socket = true;
+
+    } else {
+        conn := &t.open_sockets[location];
+        if !default_send(t, conn, req) {
+            //
+            // If sending the request did not succeed, we need to make a new
+            // connection and try again.
+            need_new_socket = true;
+
+            //
+            // But first, we close the existing connection completely.
+            default_transport_close_connection(t, location.first, location.second);
+        }
     }
 
-    if err := socket->connect(req.url.host, ~~ req.url.port); err != .None {
-        t.error = .Connection_Failed;
-        return null;
-    }
+    if need_new_socket {
+        //
+        // Create a new connection, and (re)send the request.
+        // If this fails, immediately return null because there is no hope.
+        new_conn := default_transport_create_connection(t, req, use_https)?;
 
-    r := io.reader_make(^socket);
-    w := io.writer_make(^socket);
-    defer {
-        io.reader_free(^r);
-        io.writer_free(^w);
+        t.open_sockets[location] = new_conn;
+        if !default_send(t, &t.open_sockets[location], req) {
+            return null;
+        }
     }
-
-    // Write the request on the socket
-    req->write(^w);
+    
+    //
+    // At this point, the request should have been sent, so it is
+    // safe to start trying to read from the socket. conn->as_stream()
+    // hides which source the data is coming from, that being the
+    // SSL socket, or the normal TCP socket.
+    conn   := &t.open_sockets[location];
+    r      := io.reader_make(conn->as_stream());
+    defer io.reader_free(^r);
 
     resp := parse_response(^r);
     if !resp {
         t.error = .Response_Parse_Failed;
+
+    } else {
+        if resp.headers->get("Connection") == "close" {
+            default_transport_close_connection(t, location.first, location.second);
+        }
     }
 
     return resp;

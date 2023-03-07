@@ -1,0 +1,33 @@
+#load "./module"
+#load "./../json/module"
+
+#library_path "./bin"
+
+use core
+
+main :: () {
+    //
+    // Create a client for sending requests. This is not required,
+    // but allows for customizations like custom headers, and
+    // persistent cookies.
+    client := http.client.Client.{};
+    defer client->free();
+
+    {
+        resp := client->get("https://httpbin.org/cookies/set", .[
+            .{"freeform", "ASDF"},
+            .{"onyx", "iscool"},
+            .{"http", "ishard"},
+            .{"s p a c e s", "a r e h a r d t o o"},
+        ]);
+        defer resp->free();
+        printf("{*}\n", resp);
+    }
+
+    {
+        resp := client->get("https://httpbin.org/cookies");
+        defer resp->free();
+        printf("{*}\n", resp);
+    }
+}
+

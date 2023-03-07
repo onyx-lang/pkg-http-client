@@ -1,0 +1,55 @@
+package http.client
+
+#package {
+
+use core { io }
+use openssl
+
+SSL_Stream :: struct {
+    use base: io.Stream;
+    ssl: SSL;
+}
+
+#inject SSL_Stream {
+    make :: (ssl: SSL) => SSL_Stream.{
+        .{ &ssl_stream_vtable, .Block_On_Read },
+        ssl
+    };
+}
+
+ssl_stream_vtable := io.Stream_Vtable.{
+    read = (s: &SSL_Stream, buffer: [] u8) -> (io.Error, u32) {
+        bytes_read := SSL_read(s.ssl, buffer.data, buffer.count);
+        if bytes_read <= 0 do return .EOF, 0;
+
+        return .None, bytes_read;
+    },
+
+    read_byte = (s: &SSL_Stream) -> (io.Error, u8) {
+        byte: [1] u8;
+        bytes_read := SSL_read(s.ssl, &byte, 1);
+        if bytes_read <= 0 do return .EOF, 0;
+
+        return .None, byte[0];
+    },
+
+    write = (s: &SSL_Stream, buffer: [] u8) -> (io.Error, u32) {
+        bytes_wrote := SSL_write(s.ssl, buffer.data, buffer.count);
+        if bytes_wrote <= 0 do return .EOF, 0;
+
+        return .None, bytes_wrote;
+    },
+
+    write_byte = (s: &SSL_Stream, byte: u8) -> io.Error {
+        bytes: [1] u8 = .[ byte ];
+        bytes_wrote := SSL_write(s.ssl, &bytes, 1);
+        if bytes_wrote <= 0 do return .EOF;
+
+        return .None;
+    }
+};
+
+
+}
+
+
