@@ -81,6 +81,10 @@ Cookie :: struct {
         c.cookies[new_cookie.key] = new_cookie;
     }
 
+    delete :: (c: &CookieJar, key: str) {
+        c.cookies->delete(key);
+    }
+
     #doc """ TODO """
     ingress_from_headers :: (c: &CookieJar, h: Headers) {
         for h->values("set-cookie") {

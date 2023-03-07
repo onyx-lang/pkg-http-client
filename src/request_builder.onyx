@@ -60,6 +60,12 @@ request_builder :: (client: &Client) -> RequestBuilder {
         return rb;
     }
 
+    delete_cookie :: (rb: RequestBuilder, key: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.cookies->delete(key);
+        return rb;
+    }
+
     set_query :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);
         r.query->set(key, value);
@@ -91,6 +97,14 @@ request_builder :: (client: &Client) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);
         r.request->set_query(&r.query);
         return rb;
+    }
+
+    //
+    // You probably shouldn't use this, because then you are
+    // responsible for calling RequestBuilder->cleanup() later,
+    // but if you know what you're doing, you'll be fine.
+    get_request :: (rb: RequestBuilder) -> &Request {
+        return cast(&_RequestBuilder, rb).request;
     }
 
     send :: (rb: RequestBuilder) -> &Response {
