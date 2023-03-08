@@ -27,14 +27,18 @@ main :: () {
         printf("{*}\n", resp);
     }
 
-    {
+    alloc.arena.auto_temp() {
         resp := http.client.request_builder(&client)
                 ->set_url("https://httpbin.org/post")
                 ->set_method(.Post)
                 ->set_query("query", "work")
-                ->set_body_json(.{
-                    wow = "This worked!"
-                })
+                ->add_form_value("test1", "foo")
+                ->add_form_value("test2", "bar")
+                ->add_form_value("test3", "baz")
+                ->attach_file("test", "file.c", "text/plain", """#include <stdio.h>
+int main() {
+    printf("Hello, World!\\n");
+}""")
                 ->send();
 
         defer resp->free();

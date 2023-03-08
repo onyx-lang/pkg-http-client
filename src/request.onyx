@@ -5,7 +5,9 @@ use core {alloc, io, string, iter}
 Request :: struct {
     method: Method;
     headers: Headers;
-    body: [] u8;
+
+    body: ? [] u8;
+    form: &FormData;
 
     url: Url;
     cookies: CookieJar;
@@ -67,8 +69,13 @@ new_request :: () -> &Request {
 
     set_body :: #match {
         (r: &Request, body: str) {
-            r.body = body;
+            r.body = Optional.make(body);
         }
+    }
+
+    set_form :: (r: &Request, form: &FormData) {
+        r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()));
+        r.form = form;
     }
 
     write :: (r: &Request, w: &io.Writer) -> bool {
@@ -88,15 +95,26 @@ new_request :: () -> &Request {
 
         r.cookies->write_header(r.url, w);
 
-        if r.body {
-            r.headers->set("Content-Length", core.tprintf("{}", r.body.count));
+        body := r.body ?? do {
+            if !r.form do return null_str;
+
+            w, sb := io.string_builder();
+            defer delete(sb);
+
+            r.form->write(&w);
+
+            return string.temp_copy(string.as_str(sb));
+        };
+
+        if body {
+            r.headers->set("Content-Length", core.tprintf("{}", body.count));
         }
 
         r.headers->write(w);
 
         io.write(w, "\r\n");
-        if r.body {
-            io.write(w, r.body);
+        if body {
+            io.write(w, body);
         }
 
         io.writer_flush(w);
@@ -109,7 +127,8 @@ new_request :: () -> &Request {
 #if #defined(package json) {
     #overload
     Request.set_body :: (r: &Request, v: json.Value) {
-        r.body = json.encode_string(v);
+        encoded_string := json.encode_string(v);
+        r.body = Optional.make(encoded_string);
     }
 }
 

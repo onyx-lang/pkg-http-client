@@ -1,6 +1,6 @@
 package http.client
 
-use core { string, conv, array, iter }
+use core { string, conv, array, iter, io, random }
 
 Method :: enum {
     Options;
@@ -284,5 +284,75 @@ QueryParam :: struct {
 
         q.encoded = res;
         return q.encoded;
+    }
+}
+
+
+// Used to construct a `multipart/form-data` content.
+FormData :: struct {
+    parts: [..] Attachment;
+    boundary: str;
+
+    Attachment :: struct {
+        name: str;
+        filename: str;
+        content_type: str;
+
+        data: str;
+    }
+}
+
+#inject FormData {
+    free :: (form: &FormData) {
+        array.free(&form.parts);
+
+        if form.boundary {
+            string.free(form.boundary);
+        }
+    }
+
+    get_boundary :: (form: &FormData) -> str {
+        if form.boundary do return form.boundary;
+
+        form.boundary = random.string(64, alpha_numeric=true);
+        return form.boundary;
+    }
+
+    attach :: (form: &FormData, name: str, data: str) {
+        form.parts << .{
+            name = name, data = data
+        };
+    }
+
+    attach_file :: (form: &FormData, name: str, filename: str, content_type: str, file_data: str) {
+        form.parts << .{
+            name = name, filename = filename,
+            content_type = content_type, data = file_data
+        };
+    }
+
+    write :: (form: &FormData, w: &io.Writer) {
+        boundary := core.tprintf("--{}", form->get_boundary());
+
+        for& form.parts {
+            io.write(w, boundary);
+            io.write(w, "\r\n");
+            io.write_format(w, "Content-Disposition: form-data; name={\"}", it.name);
+
+            if it.filename {
+                io.write_format(w, "; filename={\"}\r\n", it.filename);
+                io.write_format(w, "Content-Type: {}\r\n", it.content_type);
+            } else {
+                io.write(w, "\r\n");
+            }
+
+            io.write(w, "\r\n");
+
+            io.write(w, it.data);
+            io.write(w, "\r\n");
+        }
+
+        io.write(w, boundary);
+        io.write(w, "--");
     }
 }

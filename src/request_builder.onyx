@@ -7,6 +7,8 @@ RequestBuilder :: #distinct &_RequestBuilder
 _RequestBuilder :: struct {
     client: &Client;
     query: Query;
+    form: ? FormData;
+
     request: &Request;
 
     // TODO: Keep track of allocator used to allocate this string.
@@ -18,6 +20,7 @@ request_builder :: (client: &Client) -> RequestBuilder {
 
     r.client = client;
     r.query = .{};
+    r.form  = .{};
     r.request = client->new_request();
 
     return RequestBuilder.{r};
@@ -80,22 +83,50 @@ request_builder :: (client: &Client) -> RequestBuilder {
         }
     }
 
+    add_form_value :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        if !r.form {
+            r.form = Optional.make(FormData.{});
+        }
+
+        r.form.value->attach(key, value);
+        return rb;
+    }
+
+    attach_file :: (rb: RequestBuilder, name: str, filename: str, content_type: str, file_data: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        if !r.form {
+            r.form = Optional.make(FormData.{});
+        }
+
+        r.form.value->attach_file(name, filename, content_type, file_data);
+        return rb;
+    }
 
     cleanup :: (rb: RequestBuilder) {
         r := cast(&_RequestBuilder, rb);
         r.query->free();
-        r.request->free();
 
         if r.body_to_free {
             delete(^r.body_to_free);
         }
 
+        if r.form {
+            r.form.value->free();
+        }
+
+        r.request->free();
         cfree(r);
     }
 
     prepare :: (rb: RequestBuilder) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);
         r.request->set_query(&r.query);
+
+        if r.form {
+            r.request->set_form(&r.form.value);
+        }
+
         return rb;
     }
 

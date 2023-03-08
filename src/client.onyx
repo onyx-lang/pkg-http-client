@@ -66,7 +66,7 @@ Client :: struct {
     post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
         req := c->new_request(.Post, url);
         req.headers->set("content-type", content_type);
-        req.body = data;
+        req.body = Optional.make(data);
 
         defer req->free();
 
