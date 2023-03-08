@@ -26,7 +26,7 @@ parse_response :: (r: &io.Reader) -> &Response {
     resp := Response.make();
 
     status_line := r->read_line(consume_newline=true, inplace=true);
-    protocol, status_line' := string.bisect(status_line, #char " ");
+    protocol, status_line~ := string.bisect(status_line, #char " ");
 
     if protocol == "HTTP/1.1" || protocol == "HTTP/1.0" {
         resp.status = ~~ conv.parse_int(status_line);

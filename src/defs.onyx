@@ -71,8 +71,8 @@ destructure_url :: (url: str) -> ?Url {
     resource := "/";
 
     u := url;
-    u', fragment := string.bisect(u, #char "#");
-    u', query    := string.bisect(u, #char "?");
+    u~, fragment := string.bisect(u, #char "#");
+    u~, query    := string.bisect(u, #char "?");
 
     if string.contains(u, "://") {
         switch v := string.read_until(&u, #char ":"); v {
@@ -97,7 +97,7 @@ destructure_url :: (url: str) -> ?Url {
         return .{};
     }
 
-    host', port_str := string.bisect(host_and_port, #char ":");
+    host~, port_str := string.bisect(host_and_port, #char ":");
     if port_str {
         port = ~~ conv.parse_int(port_str);
     }
@@ -168,7 +168,7 @@ urldecode :: (s: str, buf: [] u8) -> str {
     for #no_close ch: i {
         if ch == #char "%" {
             a, e  := iter.take_one(i, no_close=true);
-            b, e' := iter.take_one(i, no_close=true);
+            b, e~ := iter.take_one(i, no_close=true);
 
             n := u8.[a, b];
 
