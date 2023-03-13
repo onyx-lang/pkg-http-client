@@ -11,6 +11,8 @@ Request :: struct {
 
     url: Url;
     cookies: CookieJar;
+
+    timeout := 10 * 1000;
 }
 
 //
@@ -69,7 +71,7 @@ new_request :: () -> &Request {
 
     set_body :: #match {
         (r: &Request, body: str) {
-            r.body = Optional.make(body);
+            r.body = body;
         }
     }
 
@@ -128,7 +130,7 @@ new_request :: () -> &Request {
     #overload
     Request.set_body :: (r: &Request, v: json.Value) {
         encoded_string := json.encode_string(v);
-        r.body = Optional.make(encoded_string);
+        r.body = encoded_string;
     }
 }
 

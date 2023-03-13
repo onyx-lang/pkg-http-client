@@ -8,6 +8,9 @@ Client :: struct {
     default_headers: Headers = Headers.make();
 
     cookies: CookieJar = CookieJar.make();
+
+    // 10 second timeout by default
+    default_timeout := 10 * 1000;
 }
 
 #inject Client {
@@ -32,6 +35,7 @@ Client :: struct {
             req := http.client.new_request();
             req.headers = c.default_headers->clone();
             req.cookies = c.cookies->clone();
+            req.timeout = c.default_timeout;
             return req;
         },
 
@@ -39,6 +43,7 @@ Client :: struct {
             req := http.client.new_request(method, url);
             req.headers = c.default_headers->clone();
             req.cookies = c.cookies->clone();
+            req.timeout = c.default_timeout;
             return req;
         }
     }
@@ -66,7 +71,7 @@ Client :: struct {
     post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
         req := c->new_request(.Post, url);
         req.headers->set("content-type", content_type);
-        req.body = Optional.make(data);
+        req.body = data;
 
         defer req->free();
 

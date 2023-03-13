@@ -75,6 +75,12 @@ request_builder :: (client: &Client) -> RequestBuilder {
         return rb;
     }
 
+    set_timeout :: (rb: RequestBuilder, timeout: i32) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request.timeout = timeout;
+        return rb;
+    }
+
     set_body :: #match {
         (rb: RequestBuilder, body: $T) -> RequestBuilder {
             r := cast(&_RequestBuilder, rb);
@@ -86,7 +92,7 @@ request_builder :: (client: &Client) -> RequestBuilder {
     add_form_value :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);
         if !r.form {
-            r.form = Optional.make(FormData.{});
+            r.form = FormData.{};
         }
 
         r.form.value->attach(key, value);
@@ -96,7 +102,7 @@ request_builder :: (client: &Client) -> RequestBuilder {
     attach_file :: (rb: RequestBuilder, name: str, filename: str, content_type: str, file_data: str) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);
         if !r.form {
-            r.form = Optional.make(FormData.{});
+            r.form = FormData.{};
         }
 
         r.form.value->attach_file(name, filename, content_type, file_data);

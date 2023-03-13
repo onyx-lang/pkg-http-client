@@ -18,6 +18,7 @@ Transport_Error :: enum {
     Obtaining_Socket_Failed;
     Connection_Failed;
     Response_Parse_Failed;
+    Timeout;
     SSL_Error;
 }
 
@@ -36,7 +37,15 @@ Default_Transport_Connection :: struct {
 
         return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
     }
+
+    poll :: (dtc: &#Self, timeout: i32) -> bool {
+        status: [1] net.Socket_Poll_Status;
+        net.socket_poll_all(.[ &dtc.socket ], timeout, status);
+
+        return status[0] == .Readable;
+    }
 }
+
 
 Default_Transport :: struct {
     use base: Transport;
@@ -138,7 +147,7 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
         tc.ssl->set(ssl);
     }
 
-    return Optional.make(tc);
+    return tc;
 }
 
 #local
@@ -203,8 +212,13 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
     // safe to start trying to read from the socket. conn->as_stream()
     // hides which source the data is coming from, that being the
     // SSL socket, or the normal TCP socket.
-    conn   := &t.open_sockets[location];
-    r      := io.reader_make(conn->as_stream());
+    conn := &t.open_sockets[location];
+    if !conn->poll(req.timeout) {
+        t.error = .Timeout;
+        return null;
+    }
+
+    r := io.reader_make(conn->as_stream());
     defer io.reader_free(&r);
 
     resp := parse_response(&r);
