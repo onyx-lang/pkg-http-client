@@ -78,6 +78,9 @@ new_request :: () -> &Request {
     set_form :: (r: &Request, form: &FormData) {
         r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()));
         r.form = form;
+
+        // Clear the body, because the form replaces it.
+        r.body = .{};
     }
 
     write :: (r: &Request, w: &io.Writer) -> bool {
