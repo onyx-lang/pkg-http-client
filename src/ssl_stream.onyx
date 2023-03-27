@@ -3,7 +3,7 @@ package http.client
 #package {
 
 use core { io }
-use openssl
+use openssl {*}
 
 SSL_Stream :: struct {
     use base: io.Stream;

@@ -1,7 +1,7 @@
 package http.client
 
-use core {net, io, sync, map, Pair, alloc}
-use openssl
+use core {package, net, io, sync, map, Pair, alloc}
+use openssl {*}
 
 Transport :: struct {
     use __vtable: &Transport_Vtable;
@@ -206,7 +206,7 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
             return null;
         }
     }
-    
+
     //
     // At this point, the request should have been sent, so it is
     // safe to start trying to read from the socket. conn->as_stream()

@@ -2,9 +2,11 @@
 #load "./../json/module"
 
 #library_path "./bin"
+#inject runtime.vars.Enable_Heap_Debug :: true
 
-use core
-#inject json.Use_Any_Encoder :: true
+use runtime
+use core {package, *}
+use http
 
 main :: () {
     //

@@ -159,6 +159,8 @@ request_builder :: (client: &Client) -> RequestBuilder {
 
 
 #if #defined(package json) {
+    use json
+
     #inject
     RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
         r := cast(&_RequestBuilder, rb);

@@ -3,7 +3,8 @@
 
 #library_path "./bin"
 
-use core
+use core {*}
+use http
 
 main :: () {
     //

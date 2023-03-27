@@ -1,6 +1,6 @@
 package http.client
 
-use core { string, conv, array, iter, io, random }
+use core { package, string, conv, array, iter, io, random }
 
 Method :: enum {
     Options;
