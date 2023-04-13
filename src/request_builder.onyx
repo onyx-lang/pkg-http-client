@@ -1,5 +1,6 @@
 package http.client
 
+use core.encoding.json
 
 RequestBuilder :: #distinct &_RequestBuilder
 
@@ -158,22 +159,18 @@ request_builder :: (client: &Client) -> RequestBuilder {
 }
 
 
-#if #defined(package json) {
-    use json
+#inject
+RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb);
 
-    #inject
-    RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
-        r := cast(&_RequestBuilder, rb);
+    // This almost always requires json.Use_Any_Encoder to be true.
+    // But that may be true by default soon anyway.
+    json_string := json.encode_string(v);
 
-        // This almost always requires json.Use_Any_Encoder to be true.
-        // But that may be true by default soon anyway.
-        json_string := json.encode_string(v);
+    r.body_to_free = json_string;
+    r.request->set_body(json_string);
+    r.request.headers->set("content-type", "application/json");
 
-        r.body_to_free = json_string;
-        r.request->set_body(json_string);
-        r.request.headers->set("content-type", "application/json");
-
-        return rb;
-    }
+    return rb;
 }
 

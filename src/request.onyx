@@ -1,6 +1,7 @@
 package http.client
 
 use core {package, alloc, io, string, iter}
+use core.encoding.json
 
 Request :: struct {
     method: Method;
@@ -129,13 +130,9 @@ new_request :: () -> &Request {
 }
 
 
-#if #defined(package json) {
-    use json
-
-    #overload
-    Request.set_body :: (r: &Request, v: json.Value) {
-        encoded_string := json.encode_string(v);
-        r.body = encoded_string;
-    }
+#overload
+Request.set_body :: (r: &Request, v: json.Value) {
+    encoded_string := json.encode_string(v);
+    r.body = encoded_string;
 }
 
