@@ -276,8 +276,10 @@ QueryParam :: struct {
             string.concat(&res, it.key, "=", it.value, "&");
         }
 
-        if res[res.count - 1] == #char "&" {
-            res.count -= 1;
+        if res.count > 0 {
+            if res[res.count - 1] == #char "&" {
+                res.count -= 1;
+            }
         }
 
         q.encoded = res;

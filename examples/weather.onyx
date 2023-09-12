@@ -1,4 +1,4 @@
-#load "./module"
+#load "module"
 
 #library_path "./bin"
 
