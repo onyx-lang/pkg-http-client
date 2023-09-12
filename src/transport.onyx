@@ -68,7 +68,9 @@ default_transport_vtable := Transport_Vtable.{
 #local
 default_transport_initialize :: (dt: &Default_Transport) {
     dt.base.error = .None;
-    map.init(&dt.open_sockets);
+
+    // Always use the heap allocator because this is a global resource.
+    map.init(&dt.open_sockets, alloc.heap_allocator);
 
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, .{});
 
