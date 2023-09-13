@@ -160,7 +160,8 @@ default_send :: (t: &Default_Transport, conn: &Default_Transport_Connection, req
     w := io.writer_make(stream);
     defer io.writer_free(&w);
 
-    return req->write(&w);
+    write_successful :=  req->write(&w);
+    return write_successful && conn->poll(req.timeout);
 }
 
 #local
