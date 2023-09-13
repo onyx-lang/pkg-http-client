@@ -97,6 +97,8 @@ default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl
         SSL_shutdown(ssl);
         SSL_free(ssl);
     }
+
+    dt.open_sockets->delete(.{host, is_ssl});
 }
 
 #local
@@ -198,6 +200,7 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
     }
 
     if need_new_socket {
+        logf(.Info, "Creating new connection to {}", location.first);
         //
         // Create a new connection, and (re)send the request.
         // If this fails, immediately return null because there is no hope.
