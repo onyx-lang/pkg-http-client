@@ -57,5 +57,11 @@ int main() {
         defer resp->free();
         printf("{*}\n", resp);
     }
+
+    {
+        resp := http.client.get("https://httpbin.org/get", .[.{"arg", "1"}]);
+        defer resp->free();
+        printf("{*}\n", resp);
+    }
 }
 

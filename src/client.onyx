@@ -4,7 +4,7 @@ use http
 use core {sync}
 
 Client :: struct {
-    transport: &Transport = &default_transport;
+    transport: &Transport = Default_Transport.make();
 
     default_headers: Headers = Headers.make();
 
@@ -18,9 +18,14 @@ Client :: struct {
     free :: (c: &Client) {
         c.default_headers->free();
         c.cookies->free();
+        c.transport->free();
     }
 
     send :: (c: &Client, req: &Request) -> &Response {
+        if !req.headers->has("user-agent") {
+            req.headers->set("user-agent", "onyx-http-client/0.1.0");
+        }
+
         resp := c.transport->send_request(req);
         if !resp do return resp;
         

@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, net, io, sync, map, Pair, alloc}
+use core {package, net, io, sync, map, Pair, alloc, iter}
 use openssl {*}
 
 Transport :: struct {
@@ -11,6 +11,7 @@ Transport :: struct {
 
 Transport_Vtable :: struct {
     send_request: (&Transport, &Request) -> &Response;
+    free: (&Transport) -> void;
 }
 
 Transport_Error :: enum {
@@ -24,28 +25,6 @@ Transport_Error :: enum {
 
 
 
-Default_Transport_Connection :: struct {
-    socket : net.Socket;
-    ssl    : ? SSL;
-}
-
-#inject Default_Transport_Connection {
-    as_stream :: (dtc: &#Self) -> &io.Stream {
-        if !dtc.ssl {
-            return &dtc.socket;
-        }
-
-        return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
-    }
-
-    poll :: (dtc: &#Self, timeout: i32) -> bool {
-        status: [1] net.Socket_Poll_Status;
-        net.socket_poll_all(.[ &dtc.socket ], timeout, status);
-
-        return status[0] == .Readable;
-    }
-}
-
 
 Default_Transport :: struct {
     use base: Transport;
@@ -56,12 +35,16 @@ Default_Transport :: struct {
     open_sockets: Map(Pair(str, bool), Default_Transport_Connection);
 }
 
-default_transport := Default_Transport.{
-    Transport.{ &default_transport_vtable },
+#inject
+Default_Transport.make :: () -> &Default_Transport {
+    return alloc.on_heap(Default_Transport.{
+        Transport.{ &default_transport_vtable }
+    });
 }
 
 default_transport_vtable := Transport_Vtable.{
-    send_request = default_send_request
+    send_request = default_send_request,
+    free = default_transport_free
 }
 
 
@@ -71,8 +54,6 @@ default_transport_initialize :: (dt: &Default_Transport) {
 
     // Always use the heap allocator because this is a global resource.
     map.init(&dt.open_sockets, alloc.heap_allocator);
-
-    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, .{});
 
     dt.ssl_ctx = SSL_CTX_new(TLS_client_method());
     if cast(u64, dt.ssl_ctx) == 0 {
@@ -86,9 +67,23 @@ default_transport_initialize :: (dt: &Default_Transport) {
 }
 
 #local
+default_transport_free :: (self: &Default_Transport) {
+    for iter.as_iter(&self.open_sockets) {
+        default_transport_close_connection(self, it.key.first, it.key.second);
+    }
+
+    delete(&self.open_sockets);
+    
+    SSL_CTX_free(self.ssl_ctx);
+}
+
+
+#local
 default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl: bool) {
     conn := &dt.open_sockets[.{host, is_ssl}];
     if !conn do return;
+
+    logf(.Debug, "Closing connection to {}", host);
 
     net.socket_close(&conn.socket);
     
@@ -103,6 +98,8 @@ default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl
 
 #local
 default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> ? Default_Transport_Connection {
+    logf(.Debug, "Creating connection to {}", req.url.host);
+
     err: #auto;
 
     tc: Default_Transport_Connection;
@@ -201,7 +198,6 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
     }
 
     if need_new_socket {
-        logf(.Info, "Creating new connection to {}", location.first);
         //
         // Create a new connection, and (re)send the request.
         // If this fails, immediately return null because there is no hope.
@@ -241,3 +237,24 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
 }
 
 
+Default_Transport_Connection :: struct {
+    socket : net.Socket;
+    ssl    : ? SSL;
+}
+
+#inject Default_Transport_Connection {
+    as_stream :: (dtc: &#Self) -> &io.Stream {
+        if !dtc.ssl {
+            return &dtc.socket;
+        }
+
+        return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
+    }
+
+    poll :: (dtc: &#Self, timeout: i32) -> bool {
+        status: [1] net.Socket_Poll_Status;
+        net.socket_poll_all(.[ &dtc.socket ], timeout, status);
+
+        return status[0] == .Readable;
+    }
+}
