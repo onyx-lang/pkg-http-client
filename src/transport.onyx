@@ -100,17 +100,18 @@ default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl
 default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> ? Default_Transport_Connection {
     logf(.Debug, "Creating connection to {}", req.url.host);
 
-    err: #auto;
-
     tc: Default_Transport_Connection;
-    tc.socket, err = net.socket_create(.Inet, .Stream);
+    tc.socket = do {
+        v := net.socket_create(.Inet, .Stream, .IP);
+        if v.Err {
+            t.error = .Obtaining_Socket_Failed;
+            return return .{};
+        }
+        return v.Ok->unwrap();
+    };
 
-    if err != .None {
-        t.error = .Obtaining_Socket_Failed;
-        return .{};
-    }
-
-    if err := tc.socket->connect(req.url.host, ~~ req.url.port); err != .None {
+    addr := net.SocketAddress.{ HostPort = .{ host = req.url.host, port = ~~req.url.port } };
+    if err := tc.socket->connect(&addr); err != .None {
         t.error = .Connection_Failed;
         return .{};
     }
@@ -154,10 +155,11 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
 #local
 default_send :: (t: &Default_Transport, conn: &Default_Transport_Connection, req: &Request) -> bool {
     stream := conn->as_stream();
-    w := io.writer_make(stream);
-    defer io.writer_free(&w);
 
-    write_successful :=  req->write(&w);
+    w := io.writer_make(stream);
+    write_successful := req->write(&w);
+    io.writer_free(&w);
+
     return write_successful && conn->poll(req.timeout);
 }
 
@@ -252,9 +254,6 @@ Default_Transport_Connection :: struct {
     }
 
     poll :: (dtc: &#Self, timeout: i32) -> bool {
-        status: [1] net.Socket_Poll_Status;
-        net.socket_poll_all(.[ &dtc.socket ], timeout, status);
-
-        return status[0] == .Readable;
+        return dtc.socket->poll() == .Readable;
     }
 }
