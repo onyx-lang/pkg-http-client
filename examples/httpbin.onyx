@@ -44,6 +44,8 @@ int main() {
 
         defer resp->free();
         printf("{*}\n", resp);
+
+        printf("{*p}\n", client.cookies);
     }
 
     {
