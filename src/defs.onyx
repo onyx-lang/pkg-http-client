@@ -111,7 +111,7 @@ destructure_url :: (url: str) -> ?Url {
 urlencode :: (s: str, allocator := context.allocator) -> str {
     out := array.make(u8, s.count, allocator=allocator);
 
-    for ch: s do switch ch {
+    for ch in s do switch ch {
         //
         // This list was taken from:
         // https://developer.mozilla.org/en-US/docs/Glossary/percent-encoding
@@ -163,7 +163,7 @@ urldecode :: (s: str, buf: [] u8) -> str {
     i := iter.as_iter(s);
     defer iter.close(i);
 
-    for #no_close ch: i {
+    for #no_close ch in i {
         if ch == #char "%" {
             a, e  := iter.take_one(i, no_close=true);
             b, e~ := iter.take_one(i, no_close=true);
@@ -224,7 +224,7 @@ QueryParam :: struct {
         enc_key   := urlencode(key);
         enc_value := urlencode(value);
 
-        for& e: q.entries {
+        for& e in q.entries {
             if e.key == enc_key {
                 delete(&e.value);
                 delete(&enc_key);
@@ -240,7 +240,7 @@ QueryParam :: struct {
     }
 
     free :: (q: &Query) {
-        for& e: q.entries {
+        for& e in q.entries {
             delete(&e.key);
             delete(&e.value);
         }
@@ -254,7 +254,7 @@ QueryParam :: struct {
     remove :: (q: &Query, key: str) {
         enc_key := urlencode(key);
 
-        for e: iter.as_iter(&q.entries) {
+        for e in iter.as_iter(&q.entries) {
             if e.key == enc_key {
                 delete(&e.key);
                 delete(&e.value);

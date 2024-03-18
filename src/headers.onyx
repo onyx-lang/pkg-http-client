@@ -41,7 +41,7 @@ Headers :: #distinct &_Headers
         if cast(&_Headers) h == null do return Headers.{nh};
         
         for iter.as_iter(h) {
-            for value: it.values {
+            for value in it.values {
                 (Headers.{nh})->add(it.header, value);
             }
         }
@@ -129,8 +129,8 @@ Headers :: #distinct &_Headers
         h_ := cast(&_Headers) h;
         if !h_ do return;
 
-        for entry: iter.as_iter(&h_.headers) {
-            for value: entry.value {
+        for entry in iter.as_iter(&h_.headers) {
+            for value in entry.value {
                 io.write_format(w, "{}: {}\r\n", entry.key, value);
             }
         }
@@ -164,7 +164,7 @@ canonicalize_header_raw :: (s: str) -> bool {
     string.to_lowercase(s);
 
     upper := true;
-    for & c: s {
+    for & c in s {
         if upper {
             if (*c)->is_lower() {
                 *c -= 32;

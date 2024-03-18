@@ -136,7 +136,7 @@ default_transport_create_connection :: (t: &Default_Transport, req: &Request, us
         try(SSL_ctrl(ssl,
                 SSL_CTRL_SET_TLSEXT_HOSTNAME,
                 ~~ TLSEXT_NAMETYPE_host_name,
-                core.tprintf("{}\x00", req.url.host).data));
+                core.tprintf(u8.[ '{', '}', 0 ], req.url.host).data));
         
         handshake_result := SSL_connect(ssl);
         if handshake_result <= 0 {
