@@ -11,139 +11,137 @@ Headers :: #distinct &_Headers
     string_pool: string.StringPool;
 }
 
-#inject Headers {
-    make :: (allocator := context.allocator) -> Headers {
-        h := new(_Headers, allocator);
-        h.allocator = allocator;
-        h.headers = make(typeof h.headers, allocator);
-        h.string_pool = string.pool_make(4096, allocator = allocator);
-        return Headers.{ h };
+Headers.make :: (allocator := context.allocator) -> Headers {
+    h := new(_Headers, allocator);
+    h.allocator = allocator;
+    h.headers = make(typeof h.headers, allocator);
+    h.string_pool = string.pool_make(4096, allocator = allocator);
+    return Headers.{ h };
+}
+
+Headers.free :: (h: Headers) {
+    h_ := cast(&_Headers) h;
+    if !h_ do return;
+
+    for iter.as_iter(&h_.headers) {
+        delete(&it.value);
     }
 
-    free :: (h: Headers) {
-        h_ := cast(&_Headers) h;
-        if !h_ do return;
+    delete(&h_.headers);
 
-        for iter.as_iter(&h_.headers) {
-            delete(&it.value);
+    h_.string_pool->free();
+
+    raw_free(h_.allocator, h_);
+}
+
+Headers.clone :: (h: Headers) -> Headers {
+    nh := cast(&_Headers) Headers.make();
+
+    if cast(&_Headers) h == null do return Headers.{nh};
+    
+    for iter.as_iter(h) {
+        for value in it.values {
+            (Headers.{nh})->add(it.header, value);
         }
-
-        delete(&h_.headers);
-
-        h_.string_pool->free();
-
-        raw_free(h_.allocator, h_);
     }
 
-    clone :: (h: Headers) -> Headers {
-        nh := cast(&_Headers) Headers.make();
+    return Headers.{nh};
+}
 
-        if cast(&_Headers) h == null do return Headers.{nh};
-        
-        for iter.as_iter(h) {
-            for value in it.values {
-                (Headers.{nh})->add(it.header, value);
-            }
+Headers.add :: (h: Headers, header: str, value: str) {
+    h_ := cast(&_Headers) h;
+
+    cheader := h->canonicalize_header(header);
+
+    headers := &h_.headers[cheader];
+    if headers == null {
+        arr := make([..] str, h_.allocator);
+        h_.headers->put(cheader, arr);
+        headers = &h_.headers[cheader];
+    }
+
+    *headers << (h_.string_pool->add(value));
+}
+
+Headers.delete :: (h: Headers, header: str) {
+    h_ := cast(&_Headers) h;
+    
+    cheader := canonicalize_header_temp(header);
+
+    if headers := &h_.headers[cheader]; headers {
+        array.free(headers);
+    }
+
+    h_.headers->delete(cheader);
+}
+
+Headers.has :: (h: Headers, header: str) -> bool {
+    h_ := cast(&_Headers) h;
+
+    cheader := canonicalize_header_temp(header);
+    return h_.headers->has(cheader);
+}
+
+Headers.get :: (h: Headers, header: str) -> str {
+    h_ := cast(&_Headers) h;
+
+    cheader := canonicalize_header_temp(header);
+
+    if headers := &h_.headers[cheader]; headers {
+        return headers.data[0];
+    }
+
+    return "";
+}
+
+Headers.values :: (h: Headers, header: str) -> [] str {
+    h_ := cast(&_Headers) h;
+
+    cheader := canonicalize_header_temp(header);
+
+    if headers := &h_.headers[cheader]; headers {
+        return (*headers);
+    }
+
+    return .[];
+}
+
+Headers.set :: (h: Headers, header, value: str) {
+    h_ := cast(&_Headers) h;
+
+    cheader := h->canonicalize_header(header);
+
+    headers := &h_.headers[cheader];
+    if headers == null {
+        arr := make([..] str, h_.allocator);
+        h_.headers->put(cheader, arr);
+        headers = &h_.headers[cheader];
+
+    } else {
+        headers.count = 0;
+    }
+
+    *headers << (h_.string_pool->add(value));
+}
+
+Headers.write :: (h: Headers, w: &io.Writer) {
+    h_ := cast(&_Headers) h;
+    if !h_ do return;
+
+    for entry in iter.as_iter(&h_.headers) {
+        for value in entry.value {
+            io.write_format(w, "{}: {}\r\n", entry.key, value);
         }
-
-        return Headers.{nh};
     }
+}
 
-    add :: (h: Headers, header: str, value: str) {
-        h_ := cast(&_Headers) h;
-
-        cheader := h->canonicalize_header(header);
-
-        headers := &h_.headers[cheader];
-        if headers == null {
-            arr := make([..] str, h_.allocator);
-            h_.headers->put(cheader, arr);
-            headers = &h_.headers[cheader];
-        }
-
-        *headers << (h_.string_pool->add(value));
-    }
-
-    delete :: (h: Headers, header: str) {
-        h_ := cast(&_Headers) h;
-        
-        cheader := canonicalize_header_temp(header);
-
-        if headers := &h_.headers[cheader]; headers {
-            array.free(headers);
-        }
-
-        h_.headers->delete(cheader);
-    }
-
-    has :: (h: Headers, header: str) -> bool {
-        h_ := cast(&_Headers) h;
-
-        cheader := canonicalize_header_temp(header);
-        return h_.headers->has(cheader);
-    }
-
-    get :: (h: Headers, header: str) -> str {
-        h_ := cast(&_Headers) h;
-
-        cheader := canonicalize_header_temp(header);
-
-        if headers := &h_.headers[cheader]; headers {
-            return headers.data[0];
-        }
-
+Headers.canonicalize_header :: (h: Headers, s: str) -> str {
+    h_ := cast(&_Headers) h;
+    new_header := h_.string_pool->add(s);
+    if canonicalize_header_raw(new_header) {
+        return new_header;
+    } else {
         return "";
-    }
-
-    values :: (h: Headers, header: str) -> [] str {
-        h_ := cast(&_Headers) h;
-
-        cheader := canonicalize_header_temp(header);
-
-        if headers := &h_.headers[cheader]; headers {
-            return (*headers);
-        }
-
-        return .[];
-    }
-
-    set :: (h: Headers, header, value: str) {
-        h_ := cast(&_Headers) h;
-
-        cheader := h->canonicalize_header(header);
-
-        headers := &h_.headers[cheader];
-        if headers == null {
-            arr := make([..] str, h_.allocator);
-            h_.headers->put(cheader, arr);
-            headers = &h_.headers[cheader];
-
-        } else {
-            headers.count = 0;
-        }
-
-        *headers << (h_.string_pool->add(value));
-    }
-
-    write :: (h: Headers, w: &io.Writer) {
-        h_ := cast(&_Headers) h;
-        if !h_ do return;
-
-        for entry in iter.as_iter(&h_.headers) {
-            for value in entry.value {
-                io.write_format(w, "{}: {}\r\n", entry.key, value);
-            }
-        }
-    }
-
-    canonicalize_header :: (h: Headers, s: str) -> str {
-        h_ := cast(&_Headers) h;
-        new_header := h_.string_pool->add(s);
-        if canonicalize_header_raw(new_header) {
-            return new_header;
-        } else {
-            return "";
-        }
     }
 }
 

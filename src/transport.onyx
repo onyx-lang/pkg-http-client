@@ -35,7 +35,6 @@ Default_Transport :: struct {
     open_sockets: Map(Pair(str, bool), Default_Transport_Connection);
 }
 
-#inject
 Default_Transport.make :: () -> &Default_Transport {
     return alloc.on_heap(Default_Transport.{
         Transport.{ &default_transport_vtable }
@@ -244,16 +243,14 @@ Default_Transport_Connection :: struct {
     ssl    : ? SSL;
 }
 
-#inject Default_Transport_Connection {
-    as_stream :: (dtc: &#Self) -> &io.Stream {
-        if !dtc.ssl {
-            return &dtc.socket;
-        }
-
-        return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
+Default_Transport_Connection.as_stream :: (dtc: &#Self) -> &io.Stream {
+    if !dtc.ssl {
+        return &dtc.socket;
     }
 
-    poll :: (dtc: &#Self, timeout: i32) -> bool {
-        return dtc.socket->poll() == .Readable;
-    }
+    return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
+}
+
+Default_Transport_Connection.poll :: (dtc: &#Self, timeout: i32) -> bool {
+    return dtc.socket->poll() == .Readable;
 }

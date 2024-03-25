@@ -10,11 +10,9 @@ SSL_Stream :: struct {
     ssl: SSL;
 }
 
-#inject SSL_Stream {
-    make :: (ssl: SSL) => SSL_Stream.{
-        .{ &ssl_stream_vtable, .Block_On_Read },
-        ssl
-    };
+SSL_Stream.make :: (ssl: SSL) => SSL_Stream.{
+    .{ &ssl_stream_vtable, .Block_On_Read },
+    ssl
 }
 
 ssl_stream_vtable := io.Stream_Vtable.{

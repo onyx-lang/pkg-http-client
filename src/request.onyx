@@ -40,93 +40,91 @@ new_request :: () -> &Request {
 }
 
 
-#inject Request {
-    free :: (r: &Request) {
-        r.headers->free();
-        r.cookies->free();
+Request.free :: (r: &Request) {
+    r.headers->free();
+    r.cookies->free();
 
-        // Should the body be freed here?
-        // Or is that the producers responsibility?
+    // Should the body be freed here?
+    // Or is that the producers responsibility?
 
-        cfree(r);
+    cfree(r);
+}
+
+Request.set_url :: (r: &Request, url: str) {
+    u := destructure_url(url);
+    if u {
+        r.url = u->unwrap();
+    }
+}
+
+Request.set_method :: (r: &Request, method: Method) {
+    r.method = method;
+}
+
+Request.set_cookie :: (r: &Request, key, value: str) {
+    r.cookies->set(.{ key, value });
+}
+
+Request.set_query :: (r: &Request, q: &Query) {
+    r.url.rawQuery = q->encode();
+}
+
+Request.set_body :: #match {
+    (r: &Request, body: str) {
+        r.body = body;
+    }
+}
+
+Request.set_form :: (r: &Request, form: &FormData) {
+    r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()));
+    r.form = form;
+
+    // Clear the body, because the form replaces it.
+    r.body = .{};
+}
+
+Request.write :: (r: &Request, w: &io.Writer) -> bool {
+    io.writer_consume_error(w);
+
+    io.write_format(w, "{} {}",
+        string.as_str(r.method),
+        r.url.resource);
+    
+    if r.url.rawQuery {
+        io.write_format(w, "?{}", r.url.rawQuery);
     }
 
-    set_url :: (r: &Request, url: str) {
-        u := destructure_url(url);
-        if u {
-            r.url = u->unwrap();
-        }
+    io.write_format(w, " {}\r\n", string.as_str(r.url.protocol));
+
+    io.write_format(w, "Host: {}\r\n", r.url.host);
+
+    r.cookies->write_header(r.url, w);
+
+    body := r.body ?? do {
+        if !r.form do return null_str;
+
+        w, sb := io.string_builder();
+        defer delete(sb);
+
+        r.form->write(&w);
+
+        return string.temp_copy(string.as_str(sb));
+    };
+
+    if body {
+        r.headers->set("Content-Length", core.tprintf("{}", body.count));
     }
 
-    set_method :: (r: &Request, method: Method) {
-        r.method = method;
+    r.headers->write(w);
+
+    io.write(w, "\r\n");
+    if body {
+        io.write(w, body);
     }
 
-    set_cookie :: (r: &Request, key, value: str) {
-        r.cookies->set(.{ key, value });
-    }
+    io.writer_flush(w);
 
-    set_query :: (r: &Request, q: &Query) {
-        r.url.rawQuery = q->encode();
-    }
-
-    set_body :: #match {
-        (r: &Request, body: str) {
-            r.body = body;
-        }
-    }
-
-    set_form :: (r: &Request, form: &FormData) {
-        r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()));
-        r.form = form;
-
-        // Clear the body, because the form replaces it.
-        r.body = .{};
-    }
-
-    write :: (r: &Request, w: &io.Writer) -> bool {
-        io.writer_consume_error(w);
-
-        io.write_format(w, "{} {}",
-            string.as_str(r.method),
-            r.url.resource);
-        
-        if r.url.rawQuery {
-            io.write_format(w, "?{}", r.url.rawQuery);
-        }
-
-        io.write_format(w, " {}\r\n", string.as_str(r.url.protocol));
-
-        io.write_format(w, "Host: {}\r\n", r.url.host);
-
-        r.cookies->write_header(r.url, w);
-
-        body := r.body ?? do {
-            if !r.form do return null_str;
-
-            w, sb := io.string_builder();
-            defer delete(sb);
-
-            r.form->write(&w);
-
-            return string.temp_copy(string.as_str(sb));
-        };
-
-        if body {
-            r.headers->set("Content-Length", core.tprintf("{}", body.count));
-        }
-
-        r.headers->write(w);
-
-        io.write(w, "\r\n");
-        if body {
-            io.write(w, body);
-        }
-
-        io.writer_flush(w);
-
-        return io.writer_consume_error(w) == .None;
-    }
+    return io.writer_consume_error(w) == .None;
 }
 
 

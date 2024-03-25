@@ -10,16 +10,26 @@ Response :: struct {
     body: [] u8;
 }
 
-#inject Response {
-    make :: () => new(#Self);
+Response.make :: () => new(#Self);
 
-    free :: (r: &Response) {
-        if r == null do return;
+Response.free :: (r: &Response) {
+    if r == null do return;
 
-        r.headers->free();
-        delete(&r.body);
-        cfree(r);
-    }
+    r.headers->free();
+    delete(&r.body);
+    cfree(r);
+}
+
+Response.as_json :: (r: &Response) => json.decode(r.body);
+
+Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
+    data := json.decode(r.body);
+    defer json.free(data);
+
+    t: T;
+    json.as_any(data.root, &t);
+
+    return t;
 }
 
 #package
@@ -98,17 +108,3 @@ read_n_bytes :: (r: &io.Reader, body: &[..] u8, n: u32) {
     }
 }
 
-
-#inject
-Response.as_json :: (r: &Response) => json.decode(r.body);
-
-#inject
-Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
-    data := json.decode(r.body);
-    defer json.free(data);
-
-    t: T;
-    json.as_any(data.root, &t);
-
-    return t;
-}

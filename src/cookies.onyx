@@ -21,117 +21,114 @@ Cookie :: struct {
     uenc_key, uenc_value: str;
 }
 
-#inject CookieJar {
-    #doc """ TODO """
-    make :: () => CookieJar.{
-        cookies = make(Map(str, Cookie)),
+#doc """ TODO """
+CookieJar.make :: () => CookieJar.{
+    cookies = make(Map(str, Cookie)),
 
-        // The largest possible cookie length is 4096 bytes,
-        // as specified in RFC 2109.
-        string_pool = string.pool_make(4096)
+    // The largest possible cookie length is 4096 bytes,
+    // as specified in RFC 2109.
+    string_pool = string.pool_make(4096)
+}
+
+#doc """ TODO """
+CookieJar.free :: (c: &CookieJar) {
+    delete(&c.cookies);
+    c.string_pool->free();
+}
+
+#doc """ TODO """
+CookieJar.clear :: (c: &CookieJar) {
+    c.cookies->clear();
+    c.string_pool->flush();
+}
+
+CookieJar.clone :: (c: &CookieJar) -> CookieJar {
+    new_jar := CookieJar.make();
+
+    for iter.as_iter(&c.cookies) {
+        new_jar->set(it.value);
     }
 
-    #doc """ TODO """
-    free :: (c: &CookieJar) {
-        delete(&c.cookies);
-        c.string_pool->free();
+    return new_jar;
+}
+
+CookieJar.set :: (c: &CookieJar, cookie: Cookie) {
+    new_cookie := cookie;
+    new_cookie.key   = c.string_pool->add(new_cookie.key);
+    new_cookie.value = c.string_pool->add(new_cookie.value);
+
+    if !new_cookie.uenc_key {
+        encoded_key := urlencode(new_cookie.key);
+        defer delete(&encoded_key);
+
+        new_cookie.uenc_key = c.string_pool->add(encoded_key);
+
+    } else {
+        new_cookie.uenc_key = c.string_pool->add(new_cookie.uenc_key);
     }
 
-    #doc """ TODO """
-    clear :: (c: &CookieJar) {
-        c.cookies->clear();
-        c.string_pool->flush();
+    if !new_cookie.uenc_value {
+        encoded_value := urlencode(new_cookie.value);
+        defer delete(&encoded_value);
+
+        new_cookie.uenc_value = c.string_pool->add(encoded_value);
+
+    } else {
+        new_cookie.uenc_value = c.string_pool->add(new_cookie.uenc_value);
     }
 
-    clone :: (c: &CookieJar) -> CookieJar {
-        new_jar := CookieJar.make();
+    c.cookies[new_cookie.key] = new_cookie;
+}
 
-        for iter.as_iter(&c.cookies) {
-            new_jar->set(it.value);
-        }
+CookieJar.delete :: (c: &CookieJar, key: str) {
+    c.cookies->delete(key);
+}
 
-        return new_jar;
-    }
+#doc """ TODO """
+CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers) {
+    for h->values("set-cookie") {
+        key_value, props := string.bisect(it, #char ";");
 
-    set :: (c: &CookieJar, cookie: Cookie) {
-        new_cookie := cookie;
-        new_cookie.key   = c.string_pool->add(new_cookie.key);
-        new_cookie.value = c.string_pool->add(new_cookie.value);
+        // FIXME: This should handle parsing the domain, path, expires, etc.
+        // if props do core.printf("Skipping cookie props: {}\n", props);
 
-        if !new_cookie.uenc_key {
-            encoded_key := urlencode(new_cookie.key);
-            defer delete(&encoded_key);
+        key, value := string.bisect(key_value, #char "=");
 
-            new_cookie.uenc_key = c.string_pool->add(encoded_key);
+        encoded_key   := c.string_pool->add(key);
+        encoded_value := c.string_pool->add(value);
 
-        } else {
-            new_cookie.uenc_key = c.string_pool->add(new_cookie.uenc_key);
-        }
+        decoded_key   := c.string_pool->add(key);
+        decoded_value := c.string_pool->add(value);
 
-        if !new_cookie.uenc_value {
-            encoded_value := urlencode(new_cookie.value);
-            defer delete(&encoded_value);
+        decoded_key = urldecode(decoded_key, decoded_key);
+        decoded_value = urldecode(decoded_value, decoded_value);
 
-            new_cookie.uenc_value = c.string_pool->add(encoded_value);
+        c.cookies[decoded_key] = .{
+            decoded_key, decoded_value,
 
-        } else {
-            new_cookie.uenc_value = c.string_pool->add(new_cookie.uenc_value);
-        }
-
-        c.cookies[new_cookie.key] = new_cookie;
-    }
-
-    delete :: (c: &CookieJar, key: str) {
-        c.cookies->delete(key);
-    }
-
-    #doc """ TODO """
-    ingress_from_headers :: (c: &CookieJar, h: Headers) {
-        for h->values("set-cookie") {
-            key_value, props := string.bisect(it, #char ";");
-
-            // FIXME: This should handle parsing the domain, path, expires, etc.
-            // if props do core.printf("Skipping cookie props: {}\n", props);
-
-            key, value := string.bisect(key_value, #char "=");
-
-            encoded_key   := c.string_pool->add(key);
-            encoded_value := c.string_pool->add(value);
-
-            decoded_key   := c.string_pool->add(key);
-            decoded_value := c.string_pool->add(value);
-
-            decoded_key = urldecode(decoded_key, decoded_key);
-            decoded_value = urldecode(decoded_value, decoded_value);
-
-            c.cookies[decoded_key] = .{
-                decoded_key, decoded_value,
-
-                uenc_key = encoded_key,
-                uenc_value = encoded_value,
-            };
-        }
-    }
-
-    #doc """ TODO """
-    write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
-        if c.cookies->empty() do return;
-
-        for iter.as_iter(&c.cookies)
-        {
-            if #first
-            {
-                io.write(w, "Cookie: ");
-            }
-            else
-            {
-                io.write(w, "; ");
-            }
-
-            io.write_format(w, "{}={}", it.value.uenc_key, it.value.uenc_value);
-        }
-
-        if !(c.cookies->empty()) do io.write(w, "\r\n");
+            uenc_key = encoded_key,
+            uenc_value = encoded_value,
+        };
     }
 }
 
+#doc """ TODO """
+CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
+    if c.cookies->empty() do return;
+
+    for iter.as_iter(&c.cookies)
+    {
+        if #first
+        {
+            io.write(w, "Cookie: ");
+        }
+        else
+        {
+            io.write(w, "; ");
+        }
+
+        io.write_format(w, "{}={}", it.value.uenc_key, it.value.uenc_value);
+    }
+
+    if !(c.cookies->empty()) do io.write(w, "\r\n");
+}

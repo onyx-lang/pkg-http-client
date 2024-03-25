@@ -14,75 +14,73 @@ Client :: struct {
     default_timeout := 10 * 1000;
 }
 
-#inject Client {
-    free :: (c: &Client) {
-        c.default_headers->free();
-        c.cookies->free();
-        c.transport->free();
+Client.free :: (c: &Client) {
+    c.default_headers->free();
+    c.cookies->free();
+    c.transport->free();
+}
+
+Client.send :: (c: &Client, req: &Request) -> &Response {
+    if !req.headers->has("user-agent") {
+        req.headers->set("user-agent", "onyx-http-client/0.1.0");
     }
 
-    send :: (c: &Client, req: &Request) -> &Response {
-        if !req.headers->has("user-agent") {
-            req.headers->set("user-agent", "onyx-http-client/0.1.0");
-        }
-
-        resp := c.transport->send_request(req);
-        if !resp do return resp;
-        
-        if resp.headers->has("set-cookie") {
-            c.cookies->ingress_from_headers(resp.headers);
-        }
-
-        return resp;
+    resp := c.transport->send_request(req);
+    if !resp do return resp;
+    
+    if resp.headers->has("set-cookie") {
+        c.cookies->ingress_from_headers(resp.headers);
     }
 
-    new_request :: #match {
-        (c: &Client) -> &Request {
-            req := http.client.new_request();
-            req.headers = c.default_headers->clone();
-            req.cookies = c.cookies->clone();
-            req.timeout = c.default_timeout;
-            return req;
-        },
+    return resp;
+}
 
-        (c: &Client, method: Method, url: str) -> &Request {
-            req := http.client.new_request(method, url);
-            req.headers = c.default_headers->clone();
-            req.cookies = c.cookies->clone();
-            req.timeout = c.default_timeout;
-            return req;
-        }
+Client.new_request :: #match {
+    (c: &Client) -> &Request {
+        req := http.client.new_request();
+        req.headers = c.default_headers->clone();
+        req.cookies = c.cookies->clone();
+        req.timeout = c.default_timeout;
+        return req;
+    },
+
+    (c: &Client, method: Method, url: str) -> &Request {
+        req := http.client.new_request(method, url);
+        req.headers = c.default_headers->clone();
+        req.cookies = c.cookies->clone();
+        req.timeout = c.default_timeout;
+        return req;
     }
+}
 
-    get :: #match {
-        (c: &Client, url: str, query_params: [] QueryParam) -> &Response {
-            q := Query.{};
-            defer q->free();
+Client.get :: #match {
+    (c: &Client, url: str, query_params: [] QueryParam) -> &Response {
+        q := Query.{};
+        defer q->free();
 
-            for & query_params do q->set(it.key, it.value);
+        for & query_params do q->set(it.key, it.value);
 
-            return c->get(url, &q);
-        },
+        return c->get(url, &q);
+    },
 
-        (c: &Client, url: str, query: &Query = null) -> &Response {
-            req := c->new_request(.Get, url);
-            defer req->free();
-
-            if query do req.url.rawQuery = query->encode();
-
-            return c->send(req);
-        },
-    }
-
-    post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
-        req := c->new_request(.Post, url);
-        req.headers->set("content-type", content_type);
-        req.body = data;
-
+    (c: &Client, url: str, query: &Query = null) -> &Response {
+        req := c->new_request(.Get, url);
         defer req->free();
 
+        if query do req.url.rawQuery = query->encode();
+
         return c->send(req);
-    }
+    },
+}
+
+Client.post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
+    req := c->new_request(.Post, url);
+    req.headers->set("content-type", content_type);
+    req.body = data;
+
+    defer req->free();
+
+    return c->send(req);
 }
 
 

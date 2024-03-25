@@ -13,21 +13,19 @@ Method :: enum {
     Connect;
 }
 
-#inject Method {
-    as_str :: (m: Method) => {
-        switch m {
-            case .Options do return "OPTIONS";
-            case .Get     do return "GET";
-            case .Head    do return "HAED";
-            case .Post    do return "POST";
-            case .Put     do return "PUT";
-            case .Delete  do return "DELETE";
-            case .Trace   do return "TRACE";
-            case .Connect do return "CONNECT";
-        }
-
-        return "";
+Method.as_str :: (m: Method) => {
+    switch m {
+        case .Options do return "OPTIONS";
+        case .Get     do return "GET";
+        case .Head    do return "HEAD";
+        case .Post    do return "POST";
+        case .Put     do return "PUT";
+        case .Delete  do return "DELETE";
+        case .Trace   do return "TRACE";
+        case .Connect do return "CONNECT";
     }
+
+    return "";
 }
 
 // Currently, this library does not support HTTP2.
@@ -38,15 +36,13 @@ Protocol :: enum {
     HTTPS11;
 }
 
-#inject Protocol {
-    as_str :: (p: Protocol) => {
-        switch p {
-            case .HTTP10           do return "HTTP/1.0";
-            case .HTTP11, .HTTPS11 do return "HTTP/1.1";
-        }
-
-        return "";
+Protocol.as_str :: (p: Protocol) => {
+    switch p {
+        case .HTTP10           do return "HTTP/1.0";
+        case .HTTP11, .HTTPS11 do return "HTTP/1.1";
     }
+
+    return "";
 }
 
 Url :: struct {
@@ -219,72 +215,70 @@ QueryParam :: struct {
     key, value: str; 
 }
 
-#inject Query {
-    set :: (q: &Query, key, value: str) {
-        enc_key   := urlencode(key);
-        enc_value := urlencode(value);
+Query.set :: (q: &Query, key, value: str) {
+    enc_key   := urlencode(key);
+    enc_value := urlencode(value);
 
-        for& e in q.entries {
-            if e.key == enc_key {
-                delete(&e.value);
-                delete(&enc_key);
-                
-                e.value = enc_value;
-                return;
-            }
+    for& e in q.entries {
+        if e.key == enc_key {
+            delete(&e.value);
+            delete(&enc_key);
+            
+            e.value = enc_value;
+            return;
         }
-
-        q.entries << .{
-            enc_key, enc_value
-        };
     }
 
-    free :: (q: &Query) {
-        for& e in q.entries {
+    q.entries << .{
+        enc_key, enc_value
+    };
+}
+
+Query.free :: (q: &Query) {
+    for& e in q.entries {
+        delete(&e.key);
+        delete(&e.value);
+    }
+    delete(&q.entries);
+
+    if q.encoded {
+        delete(&q.encoded);
+    }
+}
+
+Query.remove :: (q: &Query, key: str) {
+    enc_key := urlencode(key);
+
+    for e in iter.as_iter(&q.entries) {
+        if e.key == enc_key {
             delete(&e.key);
             delete(&e.value);
-        }
-        delete(&q.entries);
-
-        if q.encoded {
-            delete(&q.encoded);
+            #remove;
+            break;
         }
     }
 
-    remove :: (q: &Query, key: str) {
-        enc_key := urlencode(key);
+    delete(&enc_key);
+}
 
-        for e in iter.as_iter(&q.entries) {
-            if e.key == enc_key {
-                delete(&e.key);
-                delete(&e.value);
-                #remove;
-                break;
-            }
-        }
-
-        delete(&enc_key);
+Query.encode :: (q: &Query) -> str {
+    if q.encoded {
+        delete(&q.encoded);
     }
 
-    encode :: (q: &Query) -> str {
-        if q.encoded {
-            delete(&q.encoded);
-        }
-
-        res: [..] u8;
-        for& q.entries {
-            string.concat(&res, it.key, "=", it.value, "&");
-        }
-
-        if res.count > 0 {
-            if res[res.count - 1] == #char "&" {
-                res.count -= 1;
-            }
-        }
-
-        q.encoded = res;
-        return q.encoded;
+    res: [..] u8;
+    for& q.entries {
+        string.concat(&res, it.key, "=", it.value, "&");
     }
+
+    if res.count > 0 {
+        if res[res.count - 1] == #char "&" {
+            res.count -= 1;
+        }
+    }
+
+    q.encoded = res;
+    return q.encoded;
 }
 
 
@@ -302,57 +296,55 @@ FormData :: struct {
     }
 }
 
-#inject FormData {
-    free :: (form: &FormData) {
-        array.free(&form.parts);
+FormData.free :: (form: &FormData) {
+    array.free(&form.parts);
 
-        if form.boundary {
-            string.free(form.boundary);
-        }
+    if form.boundary {
+        string.free(form.boundary);
     }
+}
 
-    get_boundary :: (form: &FormData) -> str {
-        if form.boundary do return form.boundary;
+FormData.get_boundary :: (form: &FormData) -> str {
+    if form.boundary do return form.boundary;
 
-        form.boundary = random.string(64, alpha_numeric=true);
-        return form.boundary;
-    }
+    form.boundary = random.string(64, alpha_numeric=true);
+    return form.boundary;
+}
 
-    attach :: (form: &FormData, name: str, data: str) {
-        form.parts << .{
-            name = name, data = data
-        };
-    }
+FormData.attach :: (form: &FormData, name: str, data: str) {
+    form.parts << .{
+        name = name, data = data
+    };
+}
 
-    attach_file :: (form: &FormData, name: str, filename: str, content_type: str, file_data: str) {
-        form.parts << .{
-            name = name, filename = filename,
-            content_type = content_type, data = file_data
-        };
-    }
+FormData.attach_file :: (form: &FormData, name: str, filename: str, content_type: str, file_data: str) {
+    form.parts << .{
+        name = name, filename = filename,
+        content_type = content_type, data = file_data
+    };
+}
 
-    write :: (form: &FormData, w: &io.Writer) {
-        boundary := core.tprintf("--{}", form->get_boundary());
+FormData.write :: (form: &FormData, w: &io.Writer) {
+    boundary := core.tprintf("--{}", form->get_boundary());
 
-        for& form.parts {
-            io.write(w, boundary);
-            io.write(w, "\r\n");
-            io.write_format(w, "Content-Disposition: form-data; name={\"}", it.name);
-
-            if it.filename {
-                io.write_format(w, "; filename={\"}\r\n", it.filename);
-                io.write_format(w, "Content-Type: {}\r\n", it.content_type);
-            } else {
-                io.write(w, "\r\n");
-            }
-
-            io.write(w, "\r\n");
-
-            io.write(w, it.data);
-            io.write(w, "\r\n");
-        }
-
+    for& form.parts {
         io.write(w, boundary);
-        io.write(w, "--");
+        io.write(w, "\r\n");
+        io.write_format(w, "Content-Disposition: form-data; name={\"}", it.name);
+
+        if it.filename {
+            io.write_format(w, "; filename={\"}\r\n", it.filename);
+            io.write_format(w, "Content-Type: {}\r\n", it.content_type);
+        } else {
+            io.write(w, "\r\n");
+        }
+
+        io.write(w, "\r\n");
+
+        io.write(w, it.data);
+        io.write(w, "\r\n");
     }
+
+    io.write(w, boundary);
+    io.write(w, "--");
 }
