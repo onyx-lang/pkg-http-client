@@ -161,8 +161,8 @@ urldecode :: (s: str, buf: [] u8) -> str {
 
     for #no_close ch in i {
         if ch == #char "%" {
-            a, e  := iter.take_one(i, no_close=true);
-            b, e~ := iter.take_one(i, no_close=true);
+            a := iter.next(i) ?? 0;
+            b := iter.next(i) ?? 0;
 
             n := u8.[a, b];
 

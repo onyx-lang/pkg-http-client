@@ -2,7 +2,7 @@ package http.client
 
 #package {
 
-use core { io }
+use core { io, Result }
 use openssl {*}
 
 SSL_Stream :: struct {
@@ -16,26 +16,26 @@ SSL_Stream.make :: (ssl: SSL) => SSL_Stream.{
 }
 
 ssl_stream_vtable := io.Stream_Vtable.{
-    read = (s: &SSL_Stream, buffer: [] u8) -> (io.Error, u32) {
+    read = (s: &SSL_Stream, buffer: [] u8) -> Result(u32, io.Error) {
         bytes_read := SSL_read(s.ssl, buffer.data, buffer.count);
-        if bytes_read <= 0 do return .EOF, 0;
+        if bytes_read <= 0 do return .{ Err = .EOF };
 
-        return .None, bytes_read;
+        return .{ Ok = bytes_read };
     },
 
-    read_byte = (s: &SSL_Stream) -> (io.Error, u8) {
+    read_byte = (s: &SSL_Stream) -> Result(u8, io.Error) {
         byte: [1] u8;
         bytes_read := SSL_read(s.ssl, &byte, 1);
-        if bytes_read <= 0 do return .EOF, 0;
+        if bytes_read <= 0 do return .{ Err = .EOF };
 
-        return .None, byte[0];
+        return .{ Ok = byte[0] };
     },
 
-    write = (s: &SSL_Stream, buffer: [] u8) -> (io.Error, u32) {
+    write = (s: &SSL_Stream, buffer: [] u8) -> Result(u32, io.Error) {
         bytes_wrote := SSL_write(s.ssl, buffer.data, buffer.count);
-        if bytes_wrote <= 0 do return .EOF, 0;
+        if bytes_wrote <= 0 do return .{ Err = .EOF };
 
-        return .None, bytes_wrote;
+        return .{ Ok = bytes_wrote };
     },
 
     write_byte = (s: &SSL_Stream, byte: u8) -> io.Error {
