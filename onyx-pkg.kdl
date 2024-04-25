@@ -3,7 +3,7 @@ package {
     author "Brendan Hansen" 
     url "git://onyxlang.io/repo/http-client" 
     description "A versatile HTTP client" 
-    version "0.0.32" 
+    version "0.0.33" 
 }
 
 config {
