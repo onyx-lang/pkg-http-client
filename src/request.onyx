@@ -111,9 +111,7 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
         return string.temp_copy(string.as_str(sb));
     };
 
-    if body {
-        r.headers->set("Content-Length", core.tprintf("{}", body.count));
-    }
+    r.headers->set("Content-Length", core.tprintf("{}", body.count));
 
     r.headers->write(w);
 
