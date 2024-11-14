@@ -87,14 +87,14 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
     io.writer_consume_error(w);
 
     io.write_format(w, "{} {}",
-        string.as_str(r.method),
+        str.as_str(r.method),
         r.url.resource);
     
     if r.url.rawQuery {
         io.write_format(w, "?{}", r.url.rawQuery);
     }
 
-    io.write_format(w, " {}\r\n", string.as_str(r.url.protocol));
+    io.write_format(w, " {}\r\n", str.as_str(r.url.protocol));
 
     io.write_format(w, "Host: {}\r\n", r.url.host);
 
@@ -108,7 +108,7 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
 
         r.form->write(&w);
 
-        return string.temp_copy(string.as_str(sb));
+        return str.temp_copy(str.as_str(sb));
     };
 
     r.headers->set("Content-Length", core.tprintf("{}", body.count));

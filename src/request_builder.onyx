@@ -114,7 +114,7 @@ RequestBuilder.cleanup :: (rb: RequestBuilder) {
     r.query->free();
 
     if r.body_to_free {
-        delete(^r.body_to_free);
+        delete(&r.body_to_free);
     }
 
     if r.form {

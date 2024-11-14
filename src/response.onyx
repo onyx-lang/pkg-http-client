@@ -1,6 +1,6 @@
 package http.client
 
-use core {string, conv, io, array}
+use core {conv, io}
 use core.encoding.json
 
 Response :: struct {
@@ -37,7 +37,7 @@ parse_response :: (r: &io.Reader) -> &Response {
     resp := Response.make();
 
     status_line := r->read_line(consume_newline=true, inplace=true);
-    protocol, status_line~ := string.bisect(status_line, #char " ");
+    protocol, status_line~ := str.bisect(status_line, #char " ");
 
     if protocol == "HTTP/1.1" || protocol == "HTTP/1.0" {
         resp.status = ~~ conv.parse_int(status_line);
@@ -54,11 +54,11 @@ parse_response :: (r: &io.Reader) -> &Response {
         defer delete(&line);
         if line == "\r\n" do break;
 
-        key, value := string.bisect(line, #char ":");
-        string.advance(&value, 1);
-        string.strip_trailing_whitespace(&value);
+        key, value := str.bisect(line, #char ":");
+        str.advance(&value, 1);
+        str.strip_trailing_whitespace(&value);
 
-        resp.headers->add(key, string.temp_copy(value));
+        resp.headers->add(key, str.temp_copy(value));
     }
 
     body: [..] u8;
@@ -85,7 +85,7 @@ read_chunked_body :: (r: &io.Reader, body: &[..] u8) {
         chunk_size := cast(u32) conv.parse_int(line, base=16);
         if chunk_size == 0 do break;
 
-        array.ensure_capacity(body, body.count + chunk_size);
+        Array.ensure_capacity(body, body.count + chunk_size);
         read_n_bytes(r, body, chunk_size);
 
         r->advance_line();
@@ -94,7 +94,7 @@ read_chunked_body :: (r: &io.Reader, body: &[..] u8) {
 
 #local
 read_simple_body :: (r: &io.Reader, body: &[..] u8, content_length: u32) {
-    array.ensure_capacity(body, content_length);
+    Array.ensure_capacity(body, content_length);
     read_n_bytes(r, body, content_length);
 }
 

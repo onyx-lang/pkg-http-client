@@ -2,14 +2,12 @@ package http.client
 
 use core {time, io, string, iter}
 
-#doc """ TODO """
 CookieJar :: struct {
     cookies: Map(str, Cookie);
 
     string_pool: string.StringPool;
 }
 
-#doc """ TODO """
 Cookie :: struct {
     key, value: str;
     expires: u64; // Unix time
@@ -21,7 +19,6 @@ Cookie :: struct {
     uenc_key, uenc_value: str;
 }
 
-#doc """ TODO """
 CookieJar.make :: () => CookieJar.{
     cookies = make(Map(str, Cookie)),
 
@@ -30,13 +27,11 @@ CookieJar.make :: () => CookieJar.{
     string_pool = string.pool_make(4096)
 }
 
-#doc """ TODO """
 CookieJar.free :: (c: &CookieJar) {
     delete(&c.cookies);
     c.string_pool->free();
 }
 
-#doc """ TODO """
 CookieJar.clear :: (c: &CookieJar) {
     c.cookies->clear();
     c.string_pool->flush();
@@ -84,15 +79,14 @@ CookieJar.delete :: (c: &CookieJar, key: str) {
     c.cookies->delete(key);
 }
 
-#doc """ TODO """
 CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers) {
     for h->values("set-cookie") {
-        key_value, props := string.bisect(it, #char ";");
+        key_value, props := str.bisect(it, #char ";");
 
         // FIXME: This should handle parsing the domain, path, expires, etc.
         // if props do core.printf("Skipping cookie props: {}\n", props);
 
-        key, value := string.bisect(key_value, #char "=");
+        key, value := str.bisect(key_value, #char "=");
 
         encoded_key   := c.string_pool->add(key);
         encoded_value := c.string_pool->add(value);
@@ -112,7 +106,6 @@ CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers) {
     }
 }
 
-#doc """ TODO """
 CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
     if c.cookies->empty() do return;
 

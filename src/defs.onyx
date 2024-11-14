@@ -1,6 +1,6 @@
 package http.client
 
-use core { package, string, conv, array, iter, io, random }
+use core { package, string, conv, iter, io, random }
 
 Method :: enum {
     Options;
@@ -55,11 +55,9 @@ Url :: struct {
 }
 
 
-#doc """
-    Breaks down a url of the form, `(https?://)host(:port)/resource[?query][#fragment]`,
-    into its component parts. The host and resource string are sub-strings
-    of the provided string, and therefore share the lifetime of the provided string.
-"""
+/// Breaks down a url of the form, `(https?://)host(:port)/resource[?query][#fragment]`,
+/// into its component parts. The host and resource string are sub-strings
+/// of the provided string, and therefore share the lifetime of the provided string.
 destructure_url :: (url: str) -> ?Url {
     protocol := Protocol.Unknown;
     host := "";
@@ -67,11 +65,11 @@ destructure_url :: (url: str) -> ?Url {
     resource := "/";
 
     u := url;
-    u~, fragment := string.bisect(u, #char "#");
-    u~, query    := string.bisect(u, #char "?");
+    u~, fragment := str.bisect(u, #char "#");
+    u~, query    := str.bisect(u, #char "?");
 
-    if string.contains(u, "://") {
-        switch v := string.read_until(&u, #char ":"); v {
+    if str.contains(u, "://") {
+        switch v := str.read_until(&u, #char ":"); v {
             case "http" {
                 // Assuming HTTP/1.1 when using 'http' protocol
                 protocol = .HTTP11;
@@ -83,17 +81,17 @@ destructure_url :: (url: str) -> ?Url {
             }
         }
 
-        string.advance(&u, 3);
+        str.advance(&u, 3);
     }
 
-    host_and_port := string.read_until(&u, #char "/");
-    if string.contains(host_and_port, #char "@") {
+    host_and_port := str.read_until(&u, #char "/");
+    if str.contains(host_and_port, #char "@") {
         // Currently, basic authentication in URL is not allowed.
         // I.e.  http://user:pass@host:port/
         return .{};
     }
 
-    host~, port_str := string.bisect(host_and_port, #char ":");
+    host~, port_str := str.bisect(host_and_port, #char ":");
     if port_str {
         port = ~~ conv.parse_int(port_str);
     }
@@ -105,7 +103,7 @@ destructure_url :: (url: str) -> ?Url {
 
 
 urlencode :: (s: str, allocator := context.allocator) -> str {
-    out := array.make(u8, s.count, allocator=allocator);
+    out := Array.make(u8, s.count, allocator=allocator);
 
     for ch in s do switch ch {
         //
@@ -132,7 +130,7 @@ urlencode :: (s: str, allocator := context.allocator) -> str {
         match(#char "%", "%25");
         match(#char " ", "%20");
 
-        case #default do out << ch;
+        case _ do out << ch;
 
         match :: macro (from: u8, to: str) {
             //
@@ -156,13 +154,13 @@ urldecode :: (s: str, allocator := context.allocator) -> str {
 urldecode :: (s: str, buf: [] u8) -> str {
     c := 0;
 
-    i := iter.as_iter(s);
-    defer iter.close(i);
+    i := Iterator.from(s);
+    defer Iterator.close(i);
 
     for #no_close ch in i {
         if ch == #char "%" {
-            a := iter.next(i) ?? 0;
-            b := iter.next(i) ?? 0;
+            a := Iterator.next(i) ?? 0;
+            b := Iterator.next(i) ?? 0;
 
             n := u8.[a, b];
 
@@ -249,7 +247,7 @@ Query.free :: (q: &Query) {
 Query.remove :: (q: &Query, key: str) {
     enc_key := urlencode(key);
 
-    for e in iter.as_iter(&q.entries) {
+    for e in Iterator.from(&q.entries) {
         if e.key == enc_key {
             delete(&e.key);
             delete(&e.value);
@@ -268,7 +266,7 @@ Query.encode :: (q: &Query) -> str {
 
     res: [..] u8;
     for& q.entries {
-        string.concat(&res, it.key, "=", it.value, "&");
+        str.concat(&res, it.key, "=", it.value, "&");
     }
 
     if res.count > 0 {
@@ -297,10 +295,10 @@ FormData :: struct {
 }
 
 FormData.free :: (form: &FormData) {
-    array.free(&form.parts);
+    Array.free(&form.parts);
 
     if form.boundary {
-        string.free(form.boundary);
+        str.free(form.boundary);
     }
 }
 

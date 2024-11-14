@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, net, io, sync, map, Pair, alloc, iter}
+use core {package, net, io, sync, Pair, alloc, iter}
 use openssl {*}
 
 Transport :: struct {
@@ -52,7 +52,7 @@ default_transport_initialize :: (dt: &Default_Transport) {
     dt.base.error = .None;
 
     // Always use the heap allocator because this is a global resource.
-    map.init(&dt.open_sockets, alloc.heap_allocator);
+    Map.init(&dt.open_sockets, alloc.heap_allocator);
 
     dt.ssl_ctx = SSL_CTX_new(TLS_client_method());
     if cast(u64, dt.ssl_ctx) == 0 {

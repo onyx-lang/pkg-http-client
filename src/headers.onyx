@@ -1,6 +1,6 @@
 package http.client
 
-use core {io, iter, array, string}
+use core {io, iter, string}
 
 Headers :: #distinct &_Headers
 
@@ -69,7 +69,7 @@ Headers.delete :: (h: Headers, header: str) {
     cheader := canonicalize_header_temp(header);
 
     if headers := &h_.headers[cheader]; headers {
-        array.free(headers);
+        Array.free(headers);
     }
 
     h_.headers->delete(cheader);
@@ -153,13 +153,13 @@ iter.as_iter :: (h: Headers) => {
 }
 
 canonicalize_header_temp :: (s: str) -> str {
-    t := string.temp_copy(s);
+    t := str.temp_copy(s);
     canonicalize_header_raw(t);
     return t;
 }
 
 canonicalize_header_raw :: (s: str) -> bool {
-    string.to_lowercase(s);
+    str.to_lowercase(s);
 
     upper := true;
     for & c in s {
