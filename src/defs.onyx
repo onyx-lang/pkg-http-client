@@ -247,14 +247,15 @@ Query.free :: (q: &Query) {
 Query.remove :: (q: &Query, key: str) {
     enc_key := urlencode(key);
 
-    for e in Iterator.from(&q.entries) {
-        if e.key == enc_key {
-            delete(&e.key);
-            delete(&e.value);
-            #remove;
-            break;
+    Array.filter(&q.entries, [e](do {
+        if e.key != enc_key {
+            return true
+        } else {
+            delete(&e.key)
+            delete(&e.value)
+            return false
         }
-    }
+    }))
 
     delete(&enc_key);
 }
