@@ -1,0 +1,245 @@
+package http.client
+
+#load "../module"
+
+use core
+use core.test
+use core {io, string, Result}
+
+@core.test.test.{"url"}
+url_parses_host_port_query :: (t: &core.test.T) {
+    u := destructure_url("https://example.com:8443/a/b?x=1#frag")->unwrap();
+    t->assert(u.protocol == .HTTPS11, "protocol");
+    t->assert(u.host == "example.com", "host");
+    t->assert(u.port == 8443, "port");
+    t->assert(u.resource == "/a/b", "resource");
+    t->assert(u.rawQuery == "x=1", "query");
+    t->assert(u.fragment == "frag", "fragment");
+}
+
+@core.test.test.{"url ipv6"}
+url_parses_ipv6 :: (t: &core.test.T) {
+    u := destructure_url("http://[::1]:8080/a?b=1#f")->unwrap();
+    t->assert(u.protocol == .HTTP11, "protocol");
+    t->assert(u.host == "::1", "host");
+    t->assert(u.port == 8080, "port");
+    t->assert(u.resource == "/a", "resource");
+    t->assert(u.rawQuery == "b=1", "query");
+    t->assert(u.fragment == "f", "fragment");
+
+    bare := destructure_url("https://[::1]/")->unwrap();
+    t->assert(bare.host == "::1", "bare host");
+    t->assert(bare.port == 443, "bare port");
+    t->assert(bare.resource == "/", "bare resource");
+}
+
+@core.test.test.{"url rejects"}
+url_rejects_bad_input :: (t: &core.test.T) {
+    t->assert(!destructure_url("http://example.com:abc/"), "bad port");
+    t->assert(!destructure_url("http://user:pass@example.com/"), "userinfo");
+    t->assert(!destructure_url("ftp://example.com/"), "scheme");
+    t->assert(!destructure_url("http://[::1/"), "unclosed ipv6");
+}
+
+@core.test.test.{"urlencode"}
+urlencode_round_trip :: (t: &core.test.T) {
+    encoded := urlencode("a b/c%");
+    defer delete(&encoded);
+    t->assert(encoded == "a%20b%2Fc%25", "encode");
+
+    decoded := urldecode("%41+%2f");
+    defer delete(&decoded);
+    t->assert(decoded == "A /", "decode");
+}
+
+@core.test.test.{"redirects"}
+redirect_urls :: (t: &core.test.T) {
+    base := destructure_url("http://example.com/a/b")->unwrap();
+
+    rel := resolve_redirect(base, "c");
+    defer delete(&rel);
+    t->assert(rel == "http://example.com/a/c", "relative");
+
+    abs := resolve_redirect(base, "/c");
+    defer delete(&abs);
+    t->assert(abs == "http://example.com/c", "absolute path");
+
+    query := resolve_redirect(base, "?x=1");
+    defer delete(&query);
+    t->assert(query == "http://example.com/a/b?x=1", "query");
+
+    other := resolve_redirect(base, "https://other/x");
+    defer delete(&other);
+    t->assert(other == "https://other/x", "absolute");
+
+    scheme := resolve_redirect(base, "//cdn.example/x");
+    defer delete(&scheme);
+    t->assert(scheme == "http://cdn.example/x", "scheme relative");
+
+    v6 := destructure_url("http://[::1]:8080/a")->unwrap();
+    v6_next := resolve_redirect(v6, "/b");
+    defer delete(&v6_next);
+    t->assert(v6_next == "http://[::1]:8080/b", "ipv6");
+
+    t->assert(method_for_redirect(301, .Post) == .Get, "301");
+    t->assert(method_for_redirect(302, .Post) == .Get, "302");
+    t->assert(method_for_redirect(303, .Put) == .Get, "303");
+    t->assert(method_for_redirect(307, .Post) == .Post, "307");
+    t->assert(method_for_redirect(308, .Put) == .Put, "308");
+}
+
+@core.test.test.{"response"}
+response_parser :: (t: &core.test.T) {
+    simple := parse_fixture("HTTP/1.1 200 OK\r\nContent-Type:text/plain\r\nContent-Length: 5\r\n\r\nhello", .Get);
+    t->assert(simple->is_ok(), "simple ok");
+    resp := simple!;
+    defer resp->free();
+    t->assert(resp.status == 200, "status");
+    t->assert(resp->is_success(), "success");
+    t->assert(resp.headers->get("content-type") == "text/plain", "header space");
+    t->assert(resp.body == "hello", "body");
+    t->assert(!resp.must_close, "keep alive");
+
+    chunked := parse_fixture("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Trail: 1\r\n\r\n", .Get);
+    t->assert(chunked->is_ok(), "chunked ok");
+    if chunked->is_ok() {
+        body := chunked!;
+        defer body->free();
+        t->assert(body.body == "hello", "chunked");
+    }
+
+    head := parse_fixture("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", .Head);
+    t->assert(head->is_ok(), "head ok");
+    if head->is_ok() {
+        body := head!;
+        defer body->free();
+        t->assert(body.body.count == 0, "head body");
+    }
+
+    empty := parse_fixture("HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello", .Get);
+    t->assert(empty->is_ok(), "204 ok");
+    if empty->is_ok() {
+        body := empty!;
+        defer body->free();
+        t->assert(body.body.count == 0, "204");
+        t->assert(body->is_success(), "204 success");
+    }
+
+    closed := parse_fixture("HTTP/1.0 200 OK\r\n\r\nhello", .Get);
+    t->assert(closed->is_ok(), "eof ok");
+    if closed->is_ok() {
+        body := closed!;
+        defer body->free();
+        t->assert(body.body == "hello", "eof body");
+        t->assert(body.must_close, "http/1.0 close");
+        t->assert(body.protocol == .HTTP10, "http/1.0");
+    }
+
+    conn := parse_fixture("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: Close\r\n\r\n", .Get);
+    t->assert(conn->is_ok(), "connection ok");
+    if conn->is_ok() {
+        body := conn!;
+        defer body->free();
+        t->assert(body.must_close, "connection close");
+    }
+
+    cont := parse_fixture("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok", .Post);
+    t->assert(cont->is_ok(), "100 ok");
+    if cont->is_ok() {
+        body := cont!;
+        defer body->free();
+        t->assert(body.status == 201, "skip 100");
+        t->assert(body.body == "ok", "after 100");
+        t->assert(body->is_success(), "201 success");
+    }
+
+    bad := parse_fixture("NOT HTTP\r\n\r\n", .Get);
+    t->assert(bad->is_err(), "bad status");
+}
+
+@core.test.test.{"cookies"}
+cookie_jar_filters :: (t: &core.test.T) {
+    jar := CookieJar.make();
+    defer jar->free();
+
+    headers := Headers.make();
+    defer headers->free();
+    headers->add("set-cookie", "a=1; Domain=example.com; Path=/app; Secure");
+    headers->add("set-cookie", "b=2; Path=/");
+    headers->add("set-cookie", "c=3; Max-Age=0");
+    headers->add("set-cookie", "d=4; Expires=Tue, 01 Jan 1980 00:00:00 GMT");
+
+    url := destructure_url("https://www.example.com/app/index")->unwrap();
+    jar->ingress_from_headers(headers, url);
+
+    https := capture_cookie_header(&jar, url);
+    defer delete(&https);
+    t->assert(str.contains(https, "a=1"), "domain cookie on subdomain");
+    t->assert(str.contains(https, "b=2"), "host cookie");
+    t->assert(!str.contains(https, "c=3"), "max-age 0");
+    t->assert(!str.contains(https, "d=4"), "expired");
+
+    other := destructure_url("https://evil.com/app")->unwrap();
+    other_header := capture_cookie_header(&jar, other);
+    defer delete(&other_header);
+    t->assert(!str.contains(other_header, "a=1"), "not cross host");
+    t->assert(!str.contains(other_header, "b=2"), "host-only");
+
+    http := destructure_url("http://www.example.com/app")->unwrap();
+    http_header := capture_cookie_header(&jar, http);
+    defer delete(&http_header);
+    t->assert(!str.contains(http_header, "a=1"), "secure not on http");
+    t->assert(str.contains(http_header, "b=2"), "non-secure on http");
+
+    other_path := destructure_url("https://www.example.com/other")->unwrap();
+    path_header := capture_cookie_header(&jar, other_path);
+    defer delete(&path_header);
+    t->assert(!str.contains(path_header, "a=1"), "path mismatch");
+    t->assert(str.contains(path_header, "b=2"), "root path");
+
+    jar->set(.{ "explicit", "yes" });
+    explicit := capture_cookie_header(&jar, other);
+    defer delete(&explicit);
+    t->assert(str.contains(explicit, "explicit=yes"), "explicit any host");
+}
+
+@core.test.test.{"request"}
+request_host_and_form :: (t: &core.test.T) {
+    req := new_request(.Get, "http://[::1]:8080/a");
+    defer req->free();
+    req.headers = Headers.make();
+    req.cookies = CookieJar.make();
+
+    w, sb := io.string_builder();
+    t->assert(req->write(&w), "write");
+    written := str.as_str(sb);
+    t->assert(str.contains(written, "Host: [::1]:8080\r\n"), "host header");
+
+    q := Query.{};
+    defer q->free();
+    q->set("a", "b c");
+    req->set_form_urlencoded(&q);
+    t->assert(req.headers->get("content-type") == "application/x-www-form-urlencoded", "form type");
+    t->assert(req.body->unwrap() == "a=b%20c", "form body");
+
+    req->set_basic_auth("user", "pass");
+    t->assert(req.headers->get("authorization") == "Basic dXNlcjpwYXNz", "basic");
+    req->set_bearer("tok");
+    t->assert(req.headers->get("authorization") == "Bearer tok", "bearer");
+}
+
+#local
+parse_fixture :: (raw: str, method: Method) -> Result(&Response, Error) {
+    stream := io.buffer_stream_make(raw, write_enabled=false);
+    reader := io.reader_make(&stream);
+    defer io.reader_free(&reader);
+    return parse_response(&reader, method);
+}
+
+#local
+capture_cookie_header :: (jar: &CookieJar, url: Url) -> str {
+    w, sb := io.string_builder();
+    jar->write_header(url, &w);
+    io.writer_flush(&w);
+    return copy_str(str.as_str(sb));
+}

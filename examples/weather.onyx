@@ -1,4 +1,4 @@
-#load "module"
+#load "../module"
 
 #library_path "./bin"
 
@@ -35,13 +35,18 @@ main :: () {
 
     q->set("key", "API KEY HERE");
     q->set("q",   "London, UK");
-    req.url.rawQuery = q->encode();
+    req->set_query(&q);
 
     //
     // Send the request.
-    resp := client->send(req);
-    println(resp.status);
+    result := client->send(req);
+    if result.Err {
+        printf("request failed: {}\n", result->err()!);
+        return;
+    }
+    resp := result!;
     defer resp->free();
+    println(resp.status);
 
     //
     // Old way of first converting to JSON,

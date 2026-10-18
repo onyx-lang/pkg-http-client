@@ -2,6 +2,18 @@ package http.client
 
 use core { package, string, conv, iter, io, random }
 
+Version :: "0.1.0"
+
+Error :: enum {
+    InvalidUrl;
+    ConnectionFailed;
+    Timeout;
+    TlsError;
+    ResponseParseFailed;
+    TooManyRedirects;
+    WriteFailed;
+}
+
 Method :: enum {
     Options;
     Get;
@@ -55,91 +67,179 @@ Url :: struct {
 }
 
 
-/// Breaks down a url of the form, `(https?://)host(:port)/resource[?query][#fragment]`,
-/// into its component parts. The host and resource string are sub-strings
-/// of the provided string, and therefore share the lifetime of the provided string.
+/// Breaks down a url of the form `https?://host[:port]/resource[?query][#fragment]`.
+/// IPv6 hosts must be wrapped in brackets: `http://[::1]:8080/`.
+/// Host and resource are substrings of `url`.
 destructure_url :: (url: str) -> ?Url {
     protocol := Protocol.Unknown;
-    host := "";
-    port := 80;
-    resource := "/";
+    port: u32 = 0;
 
     u := url;
     u~, fragment := str.bisect(u, #char "#");
     u~, query    := str.bisect(u, #char "?");
 
     if str.contains(u, "://") {
-        switch v := str.read_until(&u, #char ":"); v {
-            case "http" {
-                // Assuming HTTP/1.1 when using 'http' protocol
-                protocol = .HTTP11;
-            }
-            
-            case "https" {
-                protocol = .HTTPS11;
-                port = 443;
-            }
+        scheme := str.read_until(&u, #char ":");
+        if scheme == "http" {
+            protocol = .HTTP11;
+            port = 80;
+        } elseif scheme == "https" {
+            protocol = .HTTPS11;
+            port = 443;
+        } else {
+            return .{};
         }
 
         str.advance(&u, 3);
     }
 
+    if !u do return .{};
+
     host_and_port := str.read_until(&u, #char "/");
     if str.contains(host_and_port, #char "@") {
-        // Currently, basic authentication in URL is not allowed.
-        // I.e.  http://user:pass@host:port/
         return .{};
     }
 
-    host~, port_str := str.bisect(host_and_port, #char ":");
-    if port_str {
-        port = ~~ conv.parse_int(port_str);
+    host: str;
+    port_str: str;
+    if host_and_port.count > 0 && host_and_port[0] == #char "[" {
+        end := str.index_of(host_and_port, #char "]");
+        if end < 1 do return .{};
+
+        host = host_and_port[1 .. end];
+        rest := host_and_port[end + 1 .. host_and_port.count];
+        if rest {
+            if rest[0] != #char ":" do return .{};
+            port_str = rest[1 .. rest.count];
+        }
+    } else {
+        host, port_str = str.bisect(host_and_port, #char ":");
     }
 
+    if !host do return .{};
+    if port_str {
+        parsed := parse_port(port_str);
+        if parsed == 0 do return .{};
+        port = parsed;
+    }
+    if port == 0 do port = 80;
+
+    resource := "/";
     if u do resource = u;
 
     return Url.{ protocol, host, port, resource, query, fragment };
 }
 
+#local
+parse_port :: (s: str) -> u32 {
+    if !s do return 0;
+    for c in s {
+        if c < #char "0" || c > #char "9" do return 0;
+    }
+
+    parsed := conv.parse_int(s);
+    if parsed <= 0 || parsed > 65535 do return 0;
+    return ~~parsed;
+}
+
+Protocol.default_port :: (p: Protocol) -> u32 {
+    if p == .HTTPS11 do return 443;
+    return 80;
+}
+
+Protocol.is_https :: (p: Protocol) -> bool {
+    return p == .HTTPS11;
+}
+
+resolve_redirect :: (base: Url, location: str) -> str {
+    loc := str.strip_whitespace(location);
+    if !loc do return "";
+
+    if str.contains(loc, "://") {
+        if destructure_url(loc) do return copy_str(loc);
+        return "";
+    }
+
+    if str.starts_with(loc, "//") {
+        scheme := "https" if base.protocol->is_https() else "http";
+        return concat_strs(scheme, ":", loc);
+    }
+
+    if loc[0] == #char "/" {
+        return format_absolute(base, loc);
+    }
+
+    if loc[0] == #char "?" {
+        return format_absolute(base, concat_strs(base.resource, loc));
+    }
+
+    dir := resource_dir(base.resource);
+    return format_absolute(base, concat_strs(dir, loc));
+}
+
+#local
+resource_dir :: (resource: str) -> str {
+    if !resource do return "/";
+    slash := str.last_index_of(resource, #char "/");
+    if slash < 0 do return "/";
+    return resource[0 .. slash + 1];
+}
+
+#local
+format_absolute :: (base: Url, path: str) -> str {
+    scheme := "https" if base.protocol->is_https() else "http";
+    host := base.host;
+    bracket := str.contains(host, #char ":");
+
+    port := "";
+    if base.port != 0 && base.port != base.protocol->default_port() {
+        port = core.tprintf(":{}", base.port);
+    }
+
+    if bracket {
+        return concat_strs(scheme, "://[", host, "]", port, path);
+    }
+    return concat_strs(scheme, "://", host, port, path);
+}
+
+copy_str :: (s: str) -> str {
+    if !s do return "";
+    out: [..] u8;
+    for c in s do out << c;
+    return out;
+}
+
+#local
+concat_strs :: (parts: ..str) -> str {
+    out: [..] u8;
+    for s in parts do str.concat(&out, s);
+    return out;
+}
+
 
 urlencode :: (s: str, allocator := context.allocator) -> str {
     out := Array.make(u8, s.count, allocator=allocator);
+    hex := "0123456789ABCDEF";
 
-    for ch in s do switch ch {
-        //
-        // This list was taken from:
-        // https://developer.mozilla.org/en-US/docs/Glossary/percent-encoding
-        match(#char ":", "%3A");
-        match(#char "/", "%2F");
-        match(#char "?", "%3F");
-        match(#char "#", "%23");
-        match(#char "[", "%5B");
-        match(#char "]", "%5D");
-        match(#char "@", "%40");
-        match(#char "!", "%21");
-        match(#char "$", "%24");
-        match(#char "&", "%26");
-        match(#char "'", "%27");
-        match(#char "(", "%28");
-        match(#char ")", "%29");
-        match(#char "*", "%2A");
-        match(#char "+", "%2B");
-        match(#char ",", "%2C");
-        match(#char ";", "%3B");
-        match(#char "=", "%3D");
-        match(#char "%", "%25");
-        match(#char " ", "%20");
-
-        case _ do out << ch;
-
-        match :: macro (from: u8, to: str) {
-            //
-            // How's this for a one-liner
-            case from do for to do out << it;
+    for ch in s {
+        if is_unreserved(ch) {
+            out << ch;
+        } else {
+            out << #char "%";
+            out << hex[ch >> 4];
+            out << hex[ch & 0xF];
         }
     }
 
     return out;
+}
+
+#local
+is_unreserved :: (ch: u8) -> bool {
+    if ch >= #char "a" && ch <= #char "z" do return true;
+    if ch >= #char "A" && ch <= #char "Z" do return true;
+    if ch >= #char "0" && ch <= #char "9" do return true;
+    return ch == #char "-" || ch == #char "." || ch == #char "_" || ch == #char "~";
 }
 
 urldecode :: #match #local {}
@@ -161,35 +261,16 @@ urldecode :: (s: str, buf: [] u8) -> str {
         if ch == #char "%" {
             a := Iterator.next(i) ?? 0;
             b := Iterator.next(i) ?? 0;
-
-            n := u8.[a, b];
-
-            v := conv.parse_int(n, base=16);
-            switch v {
-                match(0x3A, #char ":");
-                match(0x2F, #char "/");
-                match(0x3F, #char "?");
-                match(0x23, #char "#");
-                match(0x5B, #char "[");
-                match(0x5D, #char "]");
-                match(0x40, #char "@");
-                match(0x21, #char "!");
-                match(0x24, #char "$");
-                match(0x26, #char "&");
-                match(0x27, #char "'");
-                match(0x28, #char "(");
-                match(0x29, #char ")");
-                match(0x2A, #char "*");
-                match(0x2B, #char "+");
-                match(0x2C, #char ",");
-                match(0x3B, #char ";");
-                match(0x3D, #char "=");
-                match(0x25, #char "%");
-                match(0x20, #char " ");
-
-                match :: macro (from: i64, to: u8) {
-                    case from { buf[c] = to; c += 1; }
-                }
+            hi := hex_value(a);
+            lo := hex_value(b);
+            if a == 0 || b == 0 || hi < 0 || lo < 0 {
+                buf[c] = ch;
+                c += 1;
+                if a != 0 do { buf[c] = a; c += 1; }
+                if b != 0 do { buf[c] = b; c += 1; }
+            } else {
+                buf[c] = ~~((hi << 4) | lo);
+                c += 1;
             }
 
         } elseif ch == #char "+" {
@@ -202,6 +283,14 @@ urldecode :: (s: str, buf: [] u8) -> str {
     }
 
     return buf.data[0 .. c];
+}
+
+#local
+hex_value :: (ch: u8) -> i32 {
+    if ch >= #char "0" && ch <= #char "9" do return ~~(ch - #char "0");
+    if ch >= #char "a" && ch <= #char "f" do return ~~(ch - #char "a" + 10);
+    if ch >= #char "A" && ch <= #char "F" do return ~~(ch - #char "A" + 10);
+    return -1;
 }
 
 Query :: struct {
@@ -345,5 +434,5 @@ FormData.write :: (form: &FormData, w: &io.Writer) {
     }
 
     io.write(w, boundary);
-    io.write(w, "--");
+    io.write(w, "--\r\n");
 }

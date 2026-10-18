@@ -23,7 +23,7 @@ main :: () {
             .{ "onyx", "iscool" },
             .{ "http", "ishard" },
             .{ "s p a c e s", "a r e h a r d t o o" },
-        ]);
+        ])!;
         defer resp->free();
         printf("{*}\n", resp);
     }
@@ -40,7 +40,7 @@ main :: () {
 int main() {
     printf("Hello, World!\\n");
 }""")
-                ->send();
+                ->send()!;
 
         defer resp->free();
         printf("{*}\n", resp);
@@ -49,19 +49,19 @@ int main() {
     }
 
     {
-        resp := client->get("https://httpbin.org/cookies");
+        resp := client->get("https://httpbin.org/cookies")!;
         defer resp->free();
         printf("{*}\n", resp);
     }
 
     {
-        resp := client->get("https://httpbin.org/get", .[.{"arg", "1"}]);
+        resp := client->get("https://httpbin.org/get", .[.{"arg", "1"}])!;
         defer resp->free();
         printf("{*}\n", resp);
     }
 
     {
-        resp := http.client.get("https://httpbin.org/get", .[.{"arg", "1"}]);
+        resp := http.client.get("https://httpbin.org/get", .[.{"arg", "1"}])!;
         defer resp->free();
         printf("{*}\n", resp);
     }

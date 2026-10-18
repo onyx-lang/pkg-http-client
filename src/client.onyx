@@ -1,7 +1,7 @@
 package http.client
 
 use http
-use core {sync}
+use core {sync, time, string, iter, alloc, Result, tprintf}
 
 Client :: struct {
     transport: &Transport = Default_Transport.make();
@@ -10,8 +10,9 @@ Client :: struct {
 
     cookies: CookieJar = CookieJar.make();
 
-    // 10 second timeout by default
-    default_timeout := 10 * 1000;
+    default_timeout := 10 * time.SECOND;
+
+    max_redirects := 10;
 }
 
 Client.free :: (c: &Client) {
@@ -20,19 +21,48 @@ Client.free :: (c: &Client) {
     c.transport->free();
 }
 
-Client.send :: (c: &Client, req: &Request) -> &Response {
+Client.send :: (c: &Client, req: &Request) -> Result(&Response, Error) {
     if !req.headers->has("user-agent") {
-        req.headers->set("user-agent", "onyx-http-client/0.1.0");
+        req.headers->set("user-agent", tprintf("onyx-http-client/{}", Version));
     }
 
-    resp := c.transport->send_request(req);
-    if !resp do return resp;
-    
-    if resp.headers->has("set-cookie") {
-        c.cookies->ingress_from_headers(resp.headers);
+    current := req;
+    owned: &Request = null;
+    defer if owned do owned->free();
+
+    followed := 0;
+    while true {
+        resp := c.transport->send_request(current)?;
+
+        if resp.headers->has("set-cookie") {
+            c.cookies->ingress_from_headers(resp.headers, current.url);
+        }
+
+        location := resp.headers->get("location");
+        if c.max_redirects == 0 || !location || !is_redirect_status(resp.status) {
+            return .{ Ok = resp };
+        }
+
+        if followed >= c.max_redirects {
+            resp->free();
+            return .{ Err = .TooManyRedirects };
+        }
+
+        next_url := resolve_redirect(current.url, location);
+        if !next_url {
+            return .{ Ok = resp };
+        }
+
+        followed += 1;
+        next := redirect_request(c, current, resp.status, next_url);
+        resp->free();
+
+        if owned do owned->free();
+        owned = next;
+        current = next;
     }
 
-    return resp;
+    return .{ Err = .TooManyRedirects };
 }
 
 Client.new_request :: #match {
@@ -54,7 +84,7 @@ Client.new_request :: #match {
 }
 
 Client.get :: #match {
-    (c: &Client, url: str, query_params: [] QueryParam) -> &Response {
+    (c: &Client, url: str, query_params: [] QueryParam) -> Result(&Response, Error) {
         q := Query.{};
         defer q->free();
 
@@ -63,17 +93,17 @@ Client.get :: #match {
         return c->get(url, &q);
     },
 
-    (c: &Client, url: str, query: &Query = null) -> &Response {
+    (c: &Client, url: str, query: &Query = null) -> Result(&Response, Error) {
         req := c->new_request(.Get, url);
         defer req->free();
 
-        if query do req.url.rawQuery = query->encode();
+        if query do req->set_query(query);
 
         return c->send(req);
     },
 }
 
-Client.post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Response {
+Client.post :: (c: &Client, url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
     req := c->new_request(.Post, url);
     req.headers->set("content-type", content_type);
     req.body = data;
@@ -83,8 +113,49 @@ Client.post :: (c: &Client, url: str, content_type: str, data: [] u8) -> &Respon
     return c->send(req);
 }
 
+is_redirect_status :: (status: u32) -> bool {
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
 
+method_for_redirect :: (status: u32, method: Method) -> Method {
+    if status == 301 || status == 302 || status == 303 do return .Get;
+    return method;
+}
 
+#local
+redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &Request {
+    parsed := destructure_url(next_url)->unwrap();
+    method := method_for_redirect(status, req.method);
+
+    next := alloc.on_heap(Request.{
+        method = method,
+        headers = req.headers->clone(),
+        url = parsed,
+        cookies = c.cookies->clone(),
+        timeout = req.timeout,
+        url_storage = next_url,
+    });
+
+    for iter.as_iter(&req.cookies.cookies) {
+        next.cookies->set(it.value);
+    }
+
+    if method == .Get && req.method != .Get {
+        next.body = .{};
+        next.form = null;
+        next.headers->delete("content-type");
+        next.headers->delete("content-length");
+    } else {
+        next.body = req.body;
+        next.form = req.form;
+    }
+
+    if !str.equal_insensitive(req.url.host, parsed.host) {
+        next.headers->delete("authorization");
+    }
+
+    return next;
+}
 
 default_client: Client;
 #local default_client_init_once: sync.Once
@@ -95,22 +166,21 @@ default_client: Client;
 get :: #match #local {}
 
 #overload
-get :: (url: str, query_params: [] QueryParam) -> &Response {
+get :: (url: str, query_params: [] QueryParam) -> Result(&Response, Error) {
     default_client_init_once->exec(init_default_client);
 
     return default_client->get(url, query_params);
 }
 
 #overload
-get :: (url: str, query: &Query = null) -> &Response {
+get :: (url: str, query: &Query = null) -> Result(&Response, Error) {
     default_client_init_once->exec(init_default_client);
 
     return default_client->get(url, query);
 }
 
-post :: (url: str, content_type: str, data: [] u8) -> &Response {
+post :: (url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
     default_client_init_once->exec(init_default_client);
 
     return default_client->post(url, content_type, data);
 }
-

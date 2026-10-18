@@ -1,0 +1,12 @@
+#load "client_tests"
+#library_path "./bin"
+#library_path "../pkg-openssl"
+
+use core
+use core.os
+
+main :: () {
+    if !core.test.run_tests() {
+        core.os.exit(1);
+    }
+}

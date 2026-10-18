@@ -1,13 +1,14 @@
 package http.client
 
-use core {conv, io}
+use core {conv, io, string, memory, Result}
 use core.encoding.json
 
 Response :: struct {
     status: u32;
+    protocol: Protocol;
     headers: Headers;
-
     body: [] u8;
+    must_close: bool;
 }
 
 Response.make :: () => new(#Self);
@@ -20,10 +21,26 @@ Response.free :: (r: &Response) {
     cfree(r);
 }
 
+Response.is_success :: (r: &Response) -> bool {
+    return r.status >= 200 && r.status < 300;
+}
+
+Response.is_redirect :: (r: &Response) -> bool {
+    return r.status >= 300 && r.status < 400;
+}
+
+Response.is_client_error :: (r: &Response) -> bool {
+    return r.status >= 400 && r.status < 500;
+}
+
+Response.is_server_error :: (r: &Response) -> bool {
+    return r.status >= 500 && r.status < 600;
+}
+
 Response.as_json :: (r: &Response) => json.decode(r.body);
 
 Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
-    data := json.decode(r.body);
+    data := json.decode(r.body)!;
     defer json.free(data);
 
     t: T;
@@ -33,78 +50,230 @@ Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
 }
 
 #package
-parse_response :: (r: &io.Reader) -> &Response {
-    resp := Response.make();
+parse_response :: (r: &io.Reader, method: Method) -> Result(&Response, Error) {
+    interim := 0;
+    while true {
+        resp := Response.make();
+        parsed := parse_one(r, method, resp);
+        if parsed.Err {
+            resp->free();
+            return .{ Err = parsed.Err->unwrap() };
+        }
 
-    status_line := r->read_line(consume_newline=true, inplace=true);
-    protocol, status_line~ := str.bisect(status_line, #char " ");
+        if resp.status >= 100 && resp.status < 200 && resp.status != 101 {
+            interim += 1;
+            resp->free();
+            if interim > 8 do return .{ Err = .ResponseParseFailed };
+            continue;
+        }
 
-    if protocol == "HTTP/1.1" || protocol == "HTTP/1.0" {
-        resp.status = ~~ conv.parse_int(status_line);
-
-    } else {
-        resp->free();
-        return null;
+        return .{ Ok = resp };
     }
+
+    return .{ Err = .ResponseParseFailed };
+}
+
+#local
+parse_one :: (r: &io.Reader, method: Method, resp: &Response) -> Result(bool, Error) {
+    status_line := r->read_line(consume_newline=true, inplace=true);
+    status_line = str.strip_whitespace(status_line);
+    if !status_line do return .{ Err = .ResponseParseFailed };
+
+    protocol, rest := str.bisect(status_line, #char " ");
+    if protocol == "HTTP/1.1" {
+        resp.protocol = .HTTP11;
+    } elseif protocol == "HTTP/1.0" {
+        resp.protocol = .HTTP10;
+    } else {
+        return .{ Err = .ResponseParseFailed };
+    }
+
+    resp.status = ~~ conv.parse_int(rest);
+    if resp.status == 0 do return .{ Err = .ResponseParseFailed };
 
     resp.headers = Headers.make();
 
     while true {
         line := r->read_line(consume_newline=true);
         defer delete(&line);
-        if line == "\r\n" do break;
 
         key, value := str.bisect(line, #char ":");
-        str.advance(&value, 1);
-        str.strip_trailing_whitespace(&value);
+        key = str.strip_whitespace(key);
+        value = str.strip_whitespace(value);
+        if !key && !value do break;
+        if !key || !str.contains(line, #char ":") do return .{ Err = .ResponseParseFailed };
 
-        resp.headers->add(key, str.temp_copy(value));
+        resp.headers->add(key, value);
+    }
+
+    if connection_has(resp.headers->get("connection"), "close") {
+        resp.must_close = true;
+    } elseif resp.protocol == .HTTP10 && !connection_has(resp.headers->get("connection"), "keep-alive") {
+        resp.must_close = true;
+    }
+
+    if method == .Head || resp.status == 204 || resp.status == 304 || (resp.status >= 100 && resp.status < 200) {
+        if resp.status == 101 do resp.must_close = true;
+        resp.body = .[];
+        return .{ Ok = true };
     }
 
     body: [..] u8;
-    if resp.headers->get("transfer-encoding") == "chunked" {
-        read_chunked_body(r, &body);
-
-    } else {
-        content_length: u32 = ~~ conv.parse_int(resp.headers->get("content-length"));
-
-        if content_length > 0 {
-            read_simple_body(r, &body, content_length);
+    if transfer_is_chunked(resp.headers->get("transfer-encoding")) {
+        if !read_chunked_body(r, &body) {
+            delete(&body);
+            return .{ Err = .ResponseParseFailed };
         }
+    } elseif resp.headers->has("content-length") {
+        length_text := str.strip_whitespace(resp.headers->get("content-length"));
+        if !length_text {
+            resp.body = body;
+            return .{ Ok = true };
+        }
+        if !all_digits(length_text) {
+            delete(&body);
+            return .{ Err = .ResponseParseFailed };
+        }
+
+        content_length := ~~ conv.parse_int(length_text);
+        if content_length > 0 && !read_exact(r, &body, ~~content_length) {
+            delete(&body);
+            return .{ Err = .ResponseParseFailed };
+        }
+    } else {
+        read_until_eof(r, &body);
+        resp.must_close = true;
     }
 
     resp.body = body;
-
-    return resp;
+    return .{ Ok = true };
 }
 
 #local
-read_chunked_body :: (r: &io.Reader, body: &[..] u8) {
+read_chunked_body :: (r: &io.Reader, body: &[..] u8) -> bool {
     while true {
-        line := r->read_line(consume_newline=true, inplace=true);
-        chunk_size := cast(u32) conv.parse_int(line, base=16);
+        line := r->read_line(consume_newline=true);
+        defer delete(&line);
+
+        size_text, _ := str.bisect(line, #char ";");
+        size_text = str.strip_whitespace(size_text);
+        if !size_text || !all_hex(size_text) do return false;
+
+        chunk_size := ~~ conv.parse_int(size_text, base=16);
         if chunk_size == 0 do break;
 
-        Array.ensure_capacity(body, body.count + chunk_size);
-        read_n_bytes(r, body, chunk_size);
+        if !read_exact(r, body, ~~chunk_size) do return false;
 
-        r->advance_line();
+        crlf := r->read_line(consume_newline=true);
+        defer delete(&crlf);
+    }
+
+    while !r.done || r.start < r.end {
+        line := r->read_line(consume_newline=true);
+        defer delete(&line);
+        if !str.strip_whitespace(line) do break;
+        if r.done && r.start == r.end do break;
+    }
+
+    return true;
+}
+
+#local
+read_exact :: (r: &io.Reader, body: &[..] u8, n: u32) -> bool {
+    remaining := n;
+    while remaining > 0 {
+        if r.start < r.end {
+            available := r.end - r.start;
+            take := available if available < remaining else remaining;
+            Array.ensure_capacity(body, body.count + take);
+            memory.copy(body.data + body.count, r.buffer.data + r.start, take);
+            body.count += take;
+            r.start += take;
+            remaining -= take;
+            continue;
+        }
+
+        if r.done do return false;
+        b := r->read_byte();
+        if r.done && r.start == r.end do return false;
+
+        Array.ensure_capacity(body, body.count + 1);
+        body.data[body.count] = b;
+        body.count += 1;
+        remaining -= 1;
+    }
+
+    return true;
+}
+
+#local
+read_until_eof :: (r: &io.Reader, body: &[..] u8) {
+    while true {
+        if r.start < r.end {
+            take := r.end - r.start;
+            Array.ensure_capacity(body, body.count + take);
+            memory.copy(body.data + body.count, r.buffer.data + r.start, take);
+            body.count += take;
+            r.start = r.end;
+            continue;
+        }
+
+        if r.done do return;
+
+        b := r->read_byte();
+        if r.done && r.start == r.end do return;
+
+        Array.ensure_capacity(body, body.count + 1);
+        body.data[body.count] = b;
+        body.count += 1;
     }
 }
 
 #local
-read_simple_body :: (r: &io.Reader, body: &[..] u8, content_length: u32) {
-    Array.ensure_capacity(body, content_length);
-    read_n_bytes(r, body, content_length);
+transfer_is_chunked :: (value: str) -> bool {
+    return header_has_token(value, "chunked");
 }
 
 #local
-read_n_bytes :: (r: &io.Reader, body: &[..] u8, n: u32) {
-    to_read := n;
-    while to_read > 0 {
-        bytes_read, err := r->read_bytes(body.data[body.count .. body.count + to_read]);
-        to_read -= bytes_read;
-        body.count += bytes_read;
-    }
+connection_has :: (value, token: str) -> bool {
+    return header_has_token(value, token);
 }
 
+#local
+header_has_token :: (value, token: str) -> bool {
+    rest := value;
+    while rest {
+        part := rest;
+        if idx := str.index_of(rest, #char ","); idx >= 0 {
+            part = rest[0 .. idx];
+            rest = rest[idx + 1 .. rest.count];
+        } else {
+            rest = "";
+        }
+        part = str.strip_whitespace(part);
+        if str.equal_insensitive(part, token) do return true;
+    }
+    return false;
+}
+
+#local
+all_digits :: (s: str) -> bool {
+    if !s do return false;
+    for c in s {
+        if c < #char "0" || c > #char "9" do return false;
+    }
+    return true;
+}
+
+#local
+all_hex :: (s: str) -> bool {
+    if !s do return false;
+    for c in s {
+        digit := false;
+        if c >= #char "0" && c <= #char "9" do digit = true;
+        if c >= #char "a" && c <= #char "f" do digit = true;
+        if c >= #char "A" && c <= #char "F" do digit = true;
+        if !digit do return false;
+    }
+    return true;
+}

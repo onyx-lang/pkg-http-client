@@ -1,6 +1,7 @@
 package http.client
 
 use core.encoding.json
+use core {time, Result}
 
 RequestBuilder :: #distinct &_RequestBuilder
 
@@ -75,9 +76,27 @@ RequestBuilder.set_query :: (rb: RequestBuilder, key, value: str) -> RequestBuil
     return rb;
 }
 
-RequestBuilder.set_timeout :: (rb: RequestBuilder, timeout: i32) -> RequestBuilder {
+RequestBuilder.set_timeout :: (rb: RequestBuilder, timeout: time.Duration) -> RequestBuilder {
     r := cast(&_RequestBuilder, rb);
     r.request.timeout = timeout;
+    return rb;
+}
+
+RequestBuilder.set_basic_auth :: (rb: RequestBuilder, user, pass: str) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb);
+    r.request->set_basic_auth(user, pass);
+    return rb;
+}
+
+RequestBuilder.set_bearer :: (rb: RequestBuilder, token: str) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb);
+    r.request->set_bearer(token);
+    return rb;
+}
+
+RequestBuilder.set_form_urlencoded :: (rb: RequestBuilder, query: &Query) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb);
+    r.request->set_form_urlencoded(query);
     return rb;
 }
 
@@ -144,7 +163,7 @@ RequestBuilder.get_request :: (rb: RequestBuilder) -> &Request {
     return cast(&_RequestBuilder, rb).request;
 }
 
-RequestBuilder.send :: (rb: RequestBuilder) -> &Response {
+RequestBuilder.send :: (rb: RequestBuilder) -> Result(&Response, Error) {
     rb->prepare();
 
     r := cast(&_RequestBuilder, rb);

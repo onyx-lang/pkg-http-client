@@ -1,7 +1,8 @@
 package http.client
 
-use core {package, alloc, io, string, iter}
+use core {package, alloc, io, string, iter, time}
 use core.encoding.json
+use core.encoding.base64
 
 Request :: struct {
     method: Method;
@@ -13,7 +14,11 @@ Request :: struct {
     url: Url;
     cookies: CookieJar;
 
-    timeout := 10 * 1000;
+    timeout := 10 * time.SECOND;
+
+    owned_query: str;
+    owned_body: str;
+    url_storage: str;
 }
 
 //
@@ -26,12 +31,15 @@ new_request :: #match #local {}
 
 #overload
 new_request :: (method: Method, url: str) -> &Request {
-    u := destructure_url(url)?;
-
-    return alloc.on_heap(Request.{
+    req := alloc.on_heap(Request.{
         method = method,
-        url = u,
     });
+
+    if u := destructure_url(url); u {
+        req.url = u->unwrap();
+    }
+
+    return req;
 }
 
 #overload
@@ -44,8 +52,9 @@ Request.free :: (r: &Request) {
     r.headers->free();
     r.cookies->free();
 
-    // Should the body be freed here?
-    // Or is that the producers responsibility?
+    if r.owned_query do delete(&r.owned_query);
+    if r.owned_body do delete(&r.owned_body);
+    if r.url_storage do delete(&r.url_storage);
 
     cfree(r);
 }
@@ -66,7 +75,31 @@ Request.set_cookie :: (r: &Request, key, value: str) {
 }
 
 Request.set_query :: (r: &Request, q: &Query) {
-    r.url.rawQuery = q->encode();
+    if r.owned_query do delete(&r.owned_query);
+
+    encoded := q->encode();
+    r.owned_query = copy_str(encoded);
+    r.url.rawQuery = r.owned_query;
+}
+
+Request.set_basic_auth :: (r: &Request, user, pass: str) {
+    raw := core.tprintf("{}:{}", user, pass);
+    encoded := base64.encode(raw);
+    defer delete(&encoded);
+    r.headers->set("Authorization", core.tprintf("Basic {}", encoded));
+}
+
+Request.set_bearer :: (r: &Request, token: str) {
+    r.headers->set("Authorization", core.tprintf("Bearer {}", token));
+}
+
+Request.set_form_urlencoded :: (r: &Request, q: &Query) {
+    if r.owned_body do delete(&r.owned_body);
+
+    r.owned_body = copy_str(q->encode());
+    r.body = r.owned_body;
+    r.form = null;
+    r.headers->set("Content-Type", "application/x-www-form-urlencoded");
 }
 
 Request.set_body :: #match {
@@ -96,7 +129,15 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
 
     io.write_format(w, " {}\r\n", str.as_str(r.url.protocol));
 
-    io.write_format(w, "Host: {}\r\n", r.url.host);
+    if str.contains(r.url.host, #char ":") {
+        io.write_format(w, "Host: [{}]", r.url.host);
+    } else {
+        io.write_format(w, "Host: {}", r.url.host);
+    }
+    if r.url.port != 0 && r.url.port != r.url.protocol->default_port() {
+        io.write_format(w, ":{}", r.url.port);
+    }
+    io.write(w, "\r\n");
 
     r.cookies->write_header(r.url, w);
 
@@ -128,7 +169,7 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
 
 #overload
 Request.set_body :: (r: &Request, v: json.Value) {
-    encoded_string := json.encode_string(v);
+    encoded_string := json.encode_string(v)!;
     r.body = encoded_string;
 }
 

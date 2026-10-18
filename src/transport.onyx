@@ -1,30 +1,33 @@
 package http.client
 
-use core {package, net, io, sync, Pair, alloc, iter}
+use core {package, net, io, sync, alloc, iter, time, hash, Result}
 use openssl {*}
 
 Transport :: struct {
     use __vtable: &Transport_Vtable;
-
-    error: Transport_Error;
 }
 
 Transport_Vtable :: struct {
-    send_request: (&Transport, &Request) -> &Response;
+    send_request: (&Transport, &Request) -> Result(&Response, Error);
     free: (&Transport) -> void;
 }
 
-Transport_Error :: enum {
-    None;
-    Obtaining_Socket_Failed;
-    Connection_Failed;
-    Response_Parse_Failed;
-    Timeout;
-    SSL_Error;
+Conn_Key :: struct {
+    host: str;
+    port: u32;
+    https: bool;
+
+    hash :: (k: Conn_Key) -> u32 {
+        h := core.hash.hash(k.host);
+        h = (h * 16777619) + k.port;
+        if k.https do h += 1;
+        return h;
+    }
 }
 
-
-
+#operator == (a, b: Conn_Key) -> bool {
+    return a.port == b.port && a.https == b.https && a.host == b.host;
+}
 
 Default_Transport :: struct {
     use base: Transport;
@@ -32,7 +35,7 @@ Default_Transport :: struct {
     initializeOnce: sync.Once;
 
     ssl_ctx: SSL_CTX;
-    open_sockets: Map(Pair(str, bool), Default_Transport_Connection);
+    open_sockets: Map(Conn_Key, Default_Transport_Connection);
 }
 
 Default_Transport.make :: () -> &Default_Transport {
@@ -46,12 +49,8 @@ default_transport_vtable := Transport_Vtable.{
     free = default_transport_free
 }
 
-
 #local
 default_transport_initialize :: (dt: &Default_Transport) {
-    dt.base.error = .None;
-
-    // Always use the heap allocator because this is a global resource.
     Map.init(&dt.open_sockets, alloc.heap_allocator);
 
     dt.ssl_ctx = SSL_CTX_new(TLS_client_method());
@@ -67,180 +66,222 @@ default_transport_initialize :: (dt: &Default_Transport) {
 
 #local
 default_transport_free :: (self: &Default_Transport) {
-    for iter.as_iter(&self.open_sockets) {
-        default_transport_close_connection(self, it.key.first, it.key.second);
+    for &self.open_sockets.entries {
+        shutdown_connection(&it.value);
+        if it.key.host do delete(&it.key.host);
     }
 
     delete(&self.open_sockets);
-    
-    SSL_CTX_free(self.ssl_ctx);
+
+    if cast(u64, self.ssl_ctx) != 0 {
+        SSL_CTX_free(self.ssl_ctx);
+    }
 }
 
-
 #local
-default_transport_close_connection :: (dt: &Default_Transport, host: str, is_ssl: bool) {
-    conn := &dt.open_sockets[.{host, is_ssl}];
-    if !conn do return;
-
-    logf(.Debug, "Closing connection to {}", host);
-
+shutdown_connection :: (conn: &Default_Transport_Connection) {
     net.socket_close(&conn.socket);
-    
+
     if conn.ssl {
         ssl := conn.ssl->unwrap();
         SSL_shutdown(ssl);
         SSL_free(ssl);
     }
-
-    dt.open_sockets->delete(.{host, is_ssl});
 }
 
 #local
-default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> ? Default_Transport_Connection {
+default_transport_close_connection :: (dt: &Default_Transport, key: Conn_Key) {
+    conn := &dt.open_sockets[key];
+    if !conn do return;
+
+    host := conn.owned_host;
+    socket := conn.socket;
+    ssl := conn.ssl;
+
+    dt.open_sockets->delete(key);
+
+    closed := Default_Transport_Connection.{ socket, ssl, host };
+    shutdown_connection(&closed);
+    if host do delete(&host);
+}
+
+#local
+default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(Default_Transport_Connection, Error) {
     logf(.Debug, "Creating connection to {}", req.url.host);
 
     tc: Default_Transport_Connection;
-    tc.socket = do {
-        v := net.socket_create(.Inet, .Stream, .IP);
-        if v.Err {
-            t.error = .Obtaining_Socket_Failed;
-            return return .{};
-        }
-        return v.Ok->unwrap();
-    };
+    created := net.socket_create(.Inet, .Stream, .IP);
+    if created.Err {
+        return .{ Err = .ConnectionFailed };
+    }
+    tc.socket = created.Ok->unwrap();
 
     addr := net.SocketAddress.{ HostPort = .{ host = req.url.host, port = ~~req.url.port } };
     if err := tc.socket->connect(&addr); err != .None {
-        t.error = .Connection_Failed;
-        return .{};
+        net.socket_close(&tc.socket);
+        return .{ Err = .ConnectionFailed };
     }
 
     if use_https {
-        try :: macro (v: $T) -> T {
-            res := v;
-            if cast(u64, res) == 0 {
-                // TODO: Better error reporting
-                // Maybe use Result(&Response, str) type?
-                t.error = .SSL_Error;
-                return return .{};
-            }
-
-            return res;
+        if cast(u64, t.ssl_ctx) == 0 {
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
         }
 
-        ssl := try(SSL_new(t.ssl_ctx));
-        bio := try(BIO_new_socket(cast(u32, tc.socket.handle), BIO_NOCLOSE));
+        ssl := SSL_new(t.ssl_ctx);
+        if cast(u64, ssl) == 0 {
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
+        }
+
+        bio := BIO_new_socket(cast(u32, tc.socket.handle), BIO_NOCLOSE);
+        if cast(u64, bio) == 0 {
+            SSL_free(ssl);
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
+        }
         SSL_set_bio(ssl, bio, bio);
 
-        try(SSL_ctrl(ssl,
-                SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                ~~ TLSEXT_NAMETYPE_host_name,
-                core.tprintf(u8.[ '{', '}', 0 ], req.url.host).data));
-        
+        host_z := core.tprintf(u8.[ '{', '}', 0 ], req.url.host);
+        if SSL_set1_host(ssl, host_z.data) != 1 {
+            SSL_free(ssl);
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
+        }
+
+        if SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, ~~ TLSEXT_NAMETYPE_host_name, host_z.data) == 0 {
+            SSL_free(ssl);
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
+        }
+
         handshake_result := SSL_connect(ssl);
         if handshake_result <= 0 {
             err := SSL_get_error(ssl, handshake_result);
             log(.Error, "HTTPS", core.tprintf("SSL Error: code {}", err));
-            t.error = .SSL_Error;
-            return .{};
+            SSL_free(ssl);
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
+        }
+
+        if SSL_get_verify_result(ssl) != ~~X509_V_OK {
+            SSL_free(ssl);
+            net.socket_close(&tc.socket);
+            return .{ Err = .TlsError };
         }
 
         tc.ssl->set(ssl);
     }
 
-    return tc;
+    return .{ Ok = tc };
 }
 
 #local
-default_send :: (t: &Default_Transport, conn: &Default_Transport_Connection, req: &Request) -> bool {
+default_send :: (conn: &Default_Transport_Connection, req: &Request) -> bool {
+    conn.socket->option(.NonBlocking, false);
     stream := conn->as_stream();
 
     w := io.writer_make(stream);
     write_successful := req->write(&w);
     io.writer_free(&w);
 
-    return write_successful && conn->poll(req.timeout);
+    return write_successful;
 }
 
 #local
-default_send_request :: (t: &Default_Transport, req: &Request) -> &Response {
-    // Optimizations that should be made:
-    // - Don't read the whole body right away
-
-    if req.url.protocol == .Unknown do return null;
+default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Response, Error) {
+    if req.url.protocol == .Unknown do return .{ Err = .InvalidUrl };
     t.initializeOnce->exec(t, default_transport_initialize);
 
     use_https := req.url.protocol == .HTTPS11;
-    location := Pair.make(req.url.host, use_https);
+    if use_https && cast(u64, t.ssl_ctx) == 0 {
+        return .{ Err = .TlsError };
+    }
 
-    //
-    // This flag is true when a new socket connection needs to be created,
-    // and the request needs to be sent from it. It starts as false, because
-    // *optimistically*, there will already be an open connection we can reuse.
-    need_new_socket := false;
+    location := Conn_Key.{ req.url.host, req.url.port, use_https };
+    reused := false;
 
-    if !t.open_sockets->has(location) {
-        //
-        // If there is no already open connection, we need to make a new one.
-        need_new_socket = true;
-
-    } else {
+    if t.open_sockets->has(location) {
         conn := &t.open_sockets[location];
-        if !default_send(t, conn, req) {
-            //
-            // If sending the request did not succeed, we need to make a new
-            // connection and try again.
-            need_new_socket = true;
-
-            //
-            // But first, we close the existing connection completely.
-            default_transport_close_connection(t, location.first, location.second);
+        if default_send(conn, req) {
+            reused = true;
+        } else {
+            default_transport_close_connection(t, location);
         }
     }
 
-    if need_new_socket {
-        //
-        // Create a new connection, and (re)send the request.
-        // If this fails, immediately return null because there is no hope.
-        new_conn := default_transport_create_connection(t, req, use_https)?;
+    if !reused {
+        return send_on_new_connection(t, req, use_https);
+    }
 
-        t.open_sockets[location] = new_conn;
-        if !default_send(t, &t.open_sockets[location], req) {
-            return null;
+    result := read_response(t, location, req);
+    if result.Err {
+        err := result.Err->unwrap();
+        if err == .Timeout || err == .ResponseParseFailed || err == .WriteFailed {
+            if t.open_sockets->has(location) {
+                default_transport_close_connection(t, location);
+            }
+            return send_on_new_connection(t, req, use_https);
         }
     }
 
-    //
-    // At this point, the request should have been sent, so it is
-    // safe to start trying to read from the socket. conn->as_stream()
-    // hides which source the data is coming from, that being the
-    // SSL socket, or the normal TCP socket.
+    return result;
+}
+
+#local
+send_on_new_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(&Response, Error) {
+    new_conn := default_transport_create_connection(t, req, use_https)?;
+    owned_host := copy_str(req.url.host);
+    new_conn.owned_host = owned_host;
+    stored := Conn_Key.{ owned_host, req.url.port, use_https };
+    t.open_sockets[stored] = new_conn;
+
+    if !default_send(&t.open_sockets[stored], req) {
+        default_transport_close_connection(t, stored);
+        return .{ Err = .WriteFailed };
+    }
+
+    return read_response(t, stored, req);
+}
+
+#local
+read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> Result(&Response, Error) {
     conn := &t.open_sockets[location];
-    if !conn->poll(req.timeout) {
-        t.error = .Timeout;
-        return null;
-    }
+    if !conn do return .{ Err = .ConnectionFailed };
 
-    r := io.reader_make(conn->as_stream());
+    conn.socket->option(.NonBlocking, true);
+
+    deadline := time.Instant.now() + req.timeout;
+    ds := Read_Stream.make(conn, deadline);
+    defer cfree(ds);
+
+    r := io.reader_make(&ds.base);
     defer io.reader_free(&r);
 
-    resp := parse_response(&r);
-    if !resp {
-        t.error = .Response_Parse_Failed;
+    resp := parse_response(&r, req.method);
+    if ds.timed_out {
+        if resp.Ok do resp.Ok->unwrap()->free();
+        default_transport_close_connection(t, location);
+        return .{ Err = .Timeout };
+    }
 
-    } else {
-        if resp.headers->get("Connection") == "close" {
-            default_transport_close_connection(t, location.first, location.second);
-        }
+    if resp.Err {
+        default_transport_close_connection(t, location);
+        return resp;
+    }
+
+    parsed := resp.Ok->unwrap();
+    if parsed.must_close {
+        default_transport_close_connection(t, location);
     }
 
     return resp;
 }
 
-
 Default_Transport_Connection :: struct {
-    socket : net.Socket;
-    ssl    : ? SSL;
+    socket: net.Socket;
+    ssl: ? SSL;
+    owned_host: str;
 }
 
 Default_Transport_Connection.as_stream :: (dtc: &#Self) -> &io.Stream {
@@ -251,6 +292,70 @@ Default_Transport_Connection.as_stream :: (dtc: &#Self) -> &io.Stream {
     return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
 }
 
-Default_Transport_Connection.poll :: (dtc: &#Self, timeout: i32) -> bool {
-    return dtc.socket->poll() == .Readable;
+Read_Stream :: struct {
+    use base: io.Stream;
+    socket: &net.Socket;
+    ssl: SSL;
+    deadline: time.Instant;
+    timed_out: bool;
+}
+
+Read_Stream.make :: (conn: &Default_Transport_Connection, deadline: time.Instant) -> &Read_Stream {
+    s := new(Read_Stream);
+    s.base = .{ &read_stream_vtable };
+    s.socket = &conn.socket;
+    s.deadline = deadline;
+    if conn.ssl do s.ssl = conn.ssl?;
+    return s;
+}
+
+read_stream_vtable := io.Stream_Vtable.{
+    read = (s: &Read_Stream, buffer: [] u8) -> Result(u32, io.Error) {
+        while true {
+            if !read_stream_wait(s) do return .{ Err = .EOF };
+
+            if cast(u64, s.ssl) != 0 {
+                n := SSL_read(s.ssl, buffer.data, buffer.count);
+                if n > 0 do return .{ Ok = n };
+
+                err := SSL_get_error(s.ssl, n);
+                if err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE do continue;
+                return .{ Err = .EOF };
+            }
+
+            result := io.stream_read(s.socket, buffer);
+            if result.Ok do return result;
+            err := result.Err->unwrap();
+            if err == .ReadLater || err == .ReadPending || err == .NoData do continue;
+            return result;
+        }
+
+        return .{ Err = .EOF };
+    },
+
+    read_byte = (s: &Read_Stream) -> Result(u8, io.Error) {
+        byte: [1] u8;
+        n := io.stream_read(&s.base, byte)?;
+        if n == 0 do return .{ Err = .EOF };
+        return .{ Ok = byte[0] };
+    },
+};
+
+#local
+read_stream_wait :: (s: &Read_Stream) -> bool {
+    if cast(u64, s.ssl) != 0 && SSL_pending(s.ssl) > 0 do return true;
+
+    remaining := s.deadline - time.Instant.now();
+    if remaining <= 0 {
+        s.timed_out = true;
+        return false;
+    }
+
+    ms := remaining->as_ms();
+    if ms > 2000000000 do ms = 2000000000;
+    status := s.socket->poll(~~ms);
+    if status == .Readable do return true;
+
+    s.timed_out = true;
+    return false;
 }

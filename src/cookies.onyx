@@ -1,6 +1,6 @@
 package http.client
 
-use core {time, io, string, iter}
+use core {time, io, string, iter, conv, tprintf}
 
 CookieJar :: struct {
     cookies: Map(str, Cookie);
@@ -10,20 +10,18 @@ CookieJar :: struct {
 
 Cookie :: struct {
     key, value: str;
-    expires: u64; // Unix time
-    max_age: u32;
     domain: str;
     path: str;
+    secure: bool;
+    host_only: bool;
+    any_host: bool;
+    expires_at: i64;
 
-    // URL Encoded key and value
     uenc_key, uenc_value: str;
 }
 
 CookieJar.make :: () => CookieJar.{
     cookies = make(Map(str, Cookie)),
-
-    // The largest possible cookie length is 4096 bytes,
-    // as specified in RFC 2109.
     string_pool = string.pool_make(4096)
 }
 
@@ -51,13 +49,18 @@ CookieJar.set :: (c: &CookieJar, cookie: Cookie) {
     new_cookie := cookie;
     new_cookie.key   = c.string_pool->add(new_cookie.key);
     new_cookie.value = c.string_pool->add(new_cookie.value);
+    new_cookie.domain = c.string_pool->add(new_cookie.domain);
+    new_cookie.path = c.string_pool->add(new_cookie.path);
+
+    if !new_cookie.domain && !new_cookie.host_only {
+        new_cookie.any_host = true;
+    }
 
     if !new_cookie.uenc_key {
         encoded_key := urlencode(new_cookie.key);
         defer delete(&encoded_key);
 
         new_cookie.uenc_key = c.string_pool->add(encoded_key);
-
     } else {
         new_cookie.uenc_key = c.string_pool->add(new_cookie.uenc_key);
     }
@@ -67,61 +70,211 @@ CookieJar.set :: (c: &CookieJar, cookie: Cookie) {
         defer delete(&encoded_value);
 
         new_cookie.uenc_value = c.string_pool->add(encoded_value);
-
     } else {
         new_cookie.uenc_value = c.string_pool->add(new_cookie.uenc_value);
     }
 
-    c.cookies[new_cookie.key] = new_cookie;
+    c.cookies[c->map_key(new_cookie)] = new_cookie;
 }
 
 CookieJar.delete :: (c: &CookieJar, key: str) {
-    c.cookies->delete(key);
+    doomed: [..] str;
+    defer delete(&doomed);
+
+    for iter.as_iter(&c.cookies) {
+        if it.value.key == key {
+            doomed << it.key;
+        }
+    }
+
+    for doomed do c.cookies->delete(it);
 }
 
-CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers) {
+CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers, url: Url) {
+    now := time.Instant.now()->to_unix();
     for h->values("set-cookie") {
-        key_value, props := str.bisect(it, #char ";");
-
-        // FIXME: This should handle parsing the domain, path, expires, etc.
-        // if props do core.printf("Skipping cookie props: {}\n", props);
-
-        key, value := str.bisect(key_value, #char "=");
-
-        encoded_key   := c.string_pool->add(key);
-        encoded_value := c.string_pool->add(value);
-
-        decoded_key   := c.string_pool->add(key);
-        decoded_value := c.string_pool->add(value);
-
-        decoded_key = urldecode(decoded_key, decoded_key);
-        decoded_value = urldecode(decoded_value, decoded_value);
-
-        c.cookies[decoded_key] = .{
-            decoded_key, decoded_value,
-
-            uenc_key = encoded_key,
-            uenc_value = encoded_value,
-        };
+        c->ingest_one(it, url, now);
     }
 }
 
 CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
     if c.cookies->empty() do return;
 
-    for iter.as_iter(&c.cookies)
-    {
-        if #first
-        {
+    now := time.Instant.now()->to_unix();
+    wrote := false;
+
+    for iter.as_iter(&c.cookies) {
+        if !cookie_matches(it.value, url, now) do continue;
+
+        if !wrote {
             io.write(w, "Cookie: ");
-        }
-        else
-        {
+            wrote = true;
+        } else {
             io.write(w, "; ");
         }
 
         io.write_format(w, "{}={}", it.value.uenc_key, it.value.uenc_value);
     }
 
-    if !(c.cookies->empty()) do io.write(w, "\r\n");
+    if wrote do io.write(w, "\r\n");
+}
+
+#local
+CookieJar.map_key :: (c: &CookieJar, cookie: Cookie) -> str {
+    id := tprintf("{}\x1f{}\x1f{}", cookie.key, cookie.domain, cookie.path);
+    return c.string_pool->add(id);
+}
+
+#local
+CookieJar.ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
+    key_value, props := str.bisect(raw, #char ";");
+    key_value = str.strip_whitespace(key_value);
+    if !key_value do return;
+
+    key, value := str.bisect(key_value, #char "=");
+    key = str.strip_whitespace(key);
+    value = str.strip_whitespace(value);
+    if value.count >= 2 && value[0] == #char "\"" && value[value.count - 1] == #char "\"" {
+        value = value[1 .. value.count - 1];
+    }
+    if !key do return;
+
+    domain := "";
+    path := "";
+    secure := false;
+    has_domain := false;
+    has_max_age := false;
+    max_age: i64 = 0;
+    expires_at: i64 = 0;
+
+    rest := props;
+    while rest {
+        part := rest;
+        if idx := str.index_of(rest, #char ";"); idx >= 0 {
+            part = rest[0 .. idx];
+            rest = rest[idx + 1 .. rest.count];
+        } else {
+            rest = "";
+        }
+        part = str.strip_whitespace(part);
+        if !part do continue;
+
+        name, attr := str.bisect(part, #char "=");
+        name = str.strip_whitespace(name);
+        attr = str.strip_whitespace(attr);
+
+        if str.equal_insensitive(name, "domain") {
+            if attr.count > 0 && attr[0] == #char "." do str.advance(&attr, 1);
+            if !attr do continue;
+            if !domain_matches(url.host, attr) do return;
+            domain = attr;
+            has_domain = true;
+        } elseif str.equal_insensitive(name, "path") {
+            path = attr;
+        } elseif str.equal_insensitive(name, "secure") {
+            secure = true;
+        } elseif str.equal_insensitive(name, "max-age") {
+            has_max_age = true;
+            max_age = conv.parse_int(attr);
+        } elseif str.equal_insensitive(name, "expires") {
+            expires_at = parse_http_date(attr);
+        }
+    }
+
+    if !has_domain {
+        domain = url.host;
+    }
+    if !path {
+        path = default_cookie_path(url.resource);
+    }
+
+    decoded_key := urldecode(key);
+    defer delete(&decoded_key);
+    decoded_value := urldecode(value);
+    defer delete(&decoded_value);
+
+    if has_max_age {
+        if max_age <= 0 {
+            c->delete_exact(decoded_key, domain, path);
+            return;
+        }
+        expires_at = now + max_age;
+    } elseif expires_at != 0 && expires_at <= now {
+        c->delete_exact(decoded_key, domain, path);
+        return;
+    }
+
+    c->set(.{
+        key = decoded_key,
+        value = decoded_value,
+        domain = domain,
+        path = path,
+        secure = secure,
+        host_only = !has_domain,
+        expires_at = expires_at,
+        uenc_key = key,
+        uenc_value = value,
+    });
+}
+
+#local
+CookieJar.delete_exact :: (c: &CookieJar, key, domain, path: str) {
+    id := tprintf("{}\x1f{}\x1f{}", key, domain, path);
+    c.cookies->delete(id);
+}
+
+#local
+cookie_matches :: (cookie: Cookie, url: Url, now: i64) -> bool {
+    if cookie.expires_at != 0 && cookie.expires_at <= now do return false;
+    if cookie.secure && !url.protocol->is_https() do return false;
+    if cookie.path && !path_matches(url.resource, cookie.path) do return false;
+
+    if cookie.any_host do return true;
+    if cookie.host_only do return str.equal_insensitive(url.host, cookie.domain);
+    return domain_matches(url.host, cookie.domain);
+}
+
+#local
+domain_matches :: (host, domain: str) -> bool {
+    if !domain do return false;
+    if str.equal_insensitive(host, domain) do return true;
+    if host.count <= domain.count + 1 do return false;
+    if host[host.count - domain.count - 1] != #char "." do return false;
+    return str.equal_insensitive(host[host.count - domain.count .. host.count], domain);
+}
+
+#local
+path_matches :: (request_path, cookie_path: str) -> bool {
+    path := request_path if request_path else "/";
+    if cookie_path.count > path.count do return false;
+    if path[0 .. cookie_path.count] != cookie_path do return false;
+    if path.count == cookie_path.count do return true;
+    if cookie_path[cookie_path.count - 1] == #char "/" do return true;
+    return path[cookie_path.count] == #char "/";
+}
+
+#local
+default_cookie_path :: (resource: str) -> str {
+    if !resource || resource[0] != #char "/" do return "/";
+    slash := str.last_index_of(resource, #char "/");
+    if slash <= 0 do return "/";
+    return resource[0 .. slash];
+}
+
+#local
+parse_http_date :: (s: str) -> i64 {
+    formats := .[
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%a, %d %b %Y %H:%M:%S UTC",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %d %H:%M:%S %Y",
+    ];
+
+    for formats {
+        if tm := time.strptime(s, it); tm {
+            return time.to_epoch(tm->unwrap());
+        }
+    }
+
+    return 0;
 }
