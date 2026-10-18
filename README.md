@@ -33,6 +33,12 @@ printf("{}\n", resp.status);
 
 The client stores `Set-Cookie` on the client jar. A cookie with no `Domain` is host-only. `Domain` must match the response host. `Path`, `Secure`, `Max-Age`, and `Expires` are honored. Cookies set with `CookieJar.set` and no domain are sent to every host.
 
+## Streaming
+
+`Request.set_body_stream` sends a body from an `io.Stream`. Pass a length to set `Content-Length`. Omit it and the body is sent with `Transfer-Encoding: chunked`. The stream is not buffered. A streamed body is sent again on `307`/`308` only if the stream can seek back to the start. Otherwise the redirect response is returned.
+
+`Client.open` and `RequestBuilder.open` return after the headers. Read the body with `Response.read` until it returns 0, or call `Response.read_all`. Freeing the response before the body is finished closes the connection. `send`, `get`, and `post` still buffer the body.
+
 ## TLS
 
 HTTPS verifies the certificate chain and the hostname. Connect and handshake timeouts are not applied.

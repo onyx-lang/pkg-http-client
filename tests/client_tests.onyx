@@ -228,6 +228,95 @@ request_host_and_form :: (t: &core.test.T) {
     t->assert(req.headers->get("authorization") == "Bearer tok", "bearer");
 }
 
+@core.test.test.{"stream request"}
+stream_request_write :: (t: &core.test.T) {
+    req := new_request(.Post, "http://example.com/upload");
+    defer req->free();
+    req.headers = Headers.make();
+    req.cookies = CookieJar.make();
+
+    payload := "hello";
+    stream := io.buffer_stream_make(payload, write_enabled=false);
+    req->set_body_stream(&stream, 5);
+
+    w, sb := io.string_builder();
+    t->assert(req->write(&w), "length write");
+    written := str.as_str(sb);
+    t->assert(str.contains(written, "Content-Length: 5\r\n"), "length header");
+    t->assert(str.contains(written, "\r\n\r\nhello"), "length body");
+    t->assert(!str.contains(written, "Transfer-Encoding"), "no chunked");
+
+    extra := io.buffer_stream_make("helloEXTRA", write_enabled=false);
+    req->set_body_stream(&extra, 5);
+    w2, sb2 := io.string_builder();
+    t->assert(req->write(&w2), "truncated write");
+    t->assert(str.contains(str.as_str(sb2), "\r\n\r\nhello"), "stopped at length");
+    t->assert(!str.contains(str.as_str(sb2), "EXTRA"), "did not read past length");
+
+    chunked_stream := io.buffer_stream_make("hello", write_enabled=false);
+    req->set_body_stream(&chunked_stream);
+    w3, sb3 := io.string_builder();
+    t->assert(req->write(&w3), "chunked write");
+    chunked := str.as_str(sb3);
+    t->assert(str.contains(chunked, "Transfer-Encoding: chunked\r\n"), "chunked header");
+    t->assert(!str.contains(chunked, "Content-Length"), "no length");
+    t->assert(str.contains(chunked, "\r\n\r\n5\r\nhello\r\n0\r\n\r\n"), "chunk framing");
+}
+
+@core.test.test.{"stream response"}
+stream_response_read :: (t: &core.test.T) {
+    resp := Response.make();
+    defer resp->free();
+    resp.body = "hello";
+    buf: [2] u8;
+    n := resp->read(buf)!;
+    t->assert(n == 2 && buf[0] == #char "h", "first");
+    n = resp->read(buf)!;
+    t->assert(n == 2 && buf[0] == #char "l", "second");
+    rest := resp->read(buf)!;
+    t->assert(rest == 1, "tail");
+    t->assert(resp->read(buf)! == 0, "eof");
+
+    raw := "5\r\nhello\r\n0\r\n\r\n";
+    stream := io.buffer_stream_make(raw, write_enabled=false);
+    reader := io.reader_make(&stream);
+    defer io.reader_free(&reader);
+
+    headers := Headers.make();
+    headers->set("transfer-encoding", "chunked");
+    framed := Response.make();
+    defer framed->free();
+    framed.headers = headers;
+    framed.status = 200;
+    decoder := Body_Decoder.from_response(framed, .Get);
+
+    out: [8] u8;
+    total: u32 = 0;
+    while total < 5 {
+        n := decoder->read(&reader, out[total .. total + 2])!;
+        t->assert(n > 0, "chunk byte");
+        total += n;
+    }
+    t->assert(out[0 .. 5] == "hello", "chunked payload");
+    t->assert(decoder->read(&reader, out)! == 0, "chunked eof");
+    t->assert(decoder->done(), "chunked done");
+
+    short := io.buffer_stream_make("hi", write_enabled=false);
+    short_reader := io.reader_make(&short);
+    defer io.reader_free(&short_reader);
+    length_headers := Headers.make();
+    length_headers->set("content-length", "5");
+    length_resp := Response.make();
+    defer length_resp->free();
+    length_resp.headers = length_headers;
+    length_resp.status = 200;
+    length_decoder := Body_Decoder.from_response(length_resp, .Get);
+    early := length_decoder->read(&short_reader, out);
+    failed := false;
+    if early.Err do failed = true;
+    t->assert(failed, "early eof");
+}
+
 #local
 parse_fixture :: (raw: str, method: Method) -> Result(&Response, Error) {
     stream := io.buffer_stream_make(raw, write_enabled=false);

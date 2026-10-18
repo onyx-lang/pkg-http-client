@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, net, io, sync, alloc, iter, time, hash, Result}
+use core {package, net, io, sync, alloc, iter, time, hash, Result, memory}
 use openssl {*}
 
 Transport :: struct {
@@ -207,6 +207,7 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Respon
             reused = true;
         } else {
             default_transport_close_connection(t, location);
+            if req.body_stream do return .{ Err = .WriteFailed };
         }
     }
 
@@ -215,7 +216,7 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Respon
     }
 
     result := read_response(t, location, req);
-    if result.Err {
+    if result.Err && !req.body_stream {
         err := result.Err->unwrap();
         if err == .Timeout || err == .ResponseParseFailed || err == .WriteFailed {
             if t.open_sockets->has(location) {
@@ -253,29 +254,93 @@ read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> R
 
     deadline := time.Instant.now() + req.timeout;
     ds := Read_Stream.make(conn, deadline);
-    defer cfree(ds);
-
     r := io.reader_make(&ds.base);
-    defer io.reader_free(&r);
 
-    resp := parse_response(&r, req.method);
+    resp := parse_response(&r, req.method, read_body=!req.stream_response);
     if ds.timed_out {
         if resp.Ok do resp.Ok->unwrap()->free();
+        io.reader_free(&r);
+        cfree(ds);
         default_transport_close_connection(t, location);
         return .{ Err = .Timeout };
     }
 
     if resp.Err {
+        io.reader_free(&r);
+        cfree(ds);
         default_transport_close_connection(t, location);
         return resp;
     }
 
     parsed := resp.Ok->unwrap();
-    if parsed.must_close {
-        default_transport_close_connection(t, location);
+    if !req.stream_response || !response_has_body(parsed, req.method) {
+        io.reader_free(&r);
+        cfree(ds);
+        if parsed.must_close {
+            default_transport_close_connection(t, location);
+        }
+        return resp;
     }
 
+    live := new(Streamed_Body);
+    live.transport = t;
+    live.port = location.port;
+    live.https = location.https;
+    live.must_close = parsed.must_close;
+    live.conn = t.open_sockets[location]!;
+    t.open_sockets->remove(location);
+    live.decoder = Body_Decoder.from_response(parsed, req.method);
+    live.read_stream = Read_Stream.make(&live.conn, deadline);
+
+    leftover := r.end - r.start;
+    buf_size: u32 = 4096;
+    if leftover > buf_size do buf_size = leftover;
+    live.reader = io.reader_make(&live.read_stream.base, buf_size);
+    if leftover > 0 {
+        memory.copy(live.reader.buffer.data, r.buffer.data + r.start, leftover);
+        live.reader.end = leftover;
+    }
+
+    io.reader_free(&r);
+    cfree(ds);
+
+    parsed.live = live;
     return resp;
+}
+
+Streamed_Body :: struct {
+    transport: &Default_Transport;
+    conn: Default_Transport_Connection;
+    port: u32;
+    https: bool;
+    read_stream: &Read_Stream;
+    reader: io.Reader;
+    decoder: Body_Decoder;
+    finished: bool;
+    failed: bool;
+    must_close: bool;
+}
+
+release_streamed_body :: (live: &Streamed_Body) {
+    if live == null || live.finished do return;
+    live.finished = true;
+
+    if live.reader.buffer do io.reader_free(&live.reader);
+    if live.read_stream {
+        cfree(live.read_stream);
+        live.read_stream = null;
+    }
+
+    key := Conn_Key.{ live.conn.owned_host, live.port, live.https };
+    if !live.failed && live.decoder->done() && !live.must_close {
+        if live.transport && !live.transport.open_sockets->has(key) {
+            live.transport.open_sockets[key] = live.conn;
+            return;
+        }
+    }
+
+    shutdown_connection(&live.conn);
+    if live.conn.owned_host do delete(&live.conn.owned_host);
 }
 
 Default_Transport_Connection :: struct {

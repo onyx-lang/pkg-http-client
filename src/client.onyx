@@ -1,7 +1,7 @@
 package http.client
 
 use http
-use core {sync, time, string, iter, alloc, Result, tprintf}
+use core {sync, time, string, iter, alloc, Result, tprintf, io}
 
 Client :: struct {
     transport: &Transport = Default_Transport.make();
@@ -22,6 +22,15 @@ Client.free :: (c: &Client) {
 }
 
 Client.send :: (c: &Client, req: &Request) -> Result(&Response, Error) {
+    return send_following(c, req, false);
+}
+
+Client.open :: (c: &Client, req: &Request) -> Result(&Response, Error) {
+    return send_following(c, req, true);
+}
+
+#local
+send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response, Error) {
     if !req.headers->has("user-agent") {
         req.headers->set("user-agent", tprintf("onyx-http-client/{}", Version));
     }
@@ -32,30 +41,42 @@ Client.send :: (c: &Client, req: &Request) -> Result(&Response, Error) {
 
     followed := 0;
     while true {
-        resp := c.transport->send_request(current)?;
+        prev := current.stream_response;
+        current.stream_response = stream;
+        resp := c.transport->send_request(current);
+        current.stream_response = prev;
+        if resp.Err do return resp;
 
-        if resp.headers->has("set-cookie") {
-            c.cookies->ingress_from_headers(resp.headers, current.url);
+        parsed := resp.Ok->unwrap();
+        if parsed.headers->has("set-cookie") {
+            c.cookies->ingress_from_headers(parsed.headers, current.url);
         }
 
-        location := resp.headers->get("location");
-        if c.max_redirects == 0 || !location || !is_redirect_status(resp.status) {
-            return .{ Ok = resp };
+        location := parsed.headers->get("location");
+        if c.max_redirects == 0 || !location || !is_redirect_status(parsed.status) {
+            return resp;
         }
 
         if followed >= c.max_redirects {
-            resp->free();
+            parsed->free();
             return .{ Err = .TooManyRedirects };
         }
 
         next_url := resolve_redirect(current.url, location);
         if !next_url {
-            return .{ Ok = resp };
+            return resp;
+        }
+
+        next_method := method_for_redirect(parsed.status, current.method);
+        if next_method == current.method && current.body_stream {
+            if current.body_stream->seek(0, io.SeekFrom.Start) != .None {
+                return resp;
+            }
         }
 
         followed += 1;
-        next := redirect_request(c, current, resp.status, next_url);
-        resp->free();
+        next := redirect_request(c, current, parsed.status, next_url);
+        parsed->free();
 
         if owned do owned->free();
         owned = next;
@@ -142,11 +163,15 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
 
     if method == .Get && req.method != .Get {
         next.body = .{};
+        next.body_stream = null;
         next.form = null;
         next.headers->delete("content-type");
         next.headers->delete("content-length");
+        next.headers->delete("transfer-encoding");
     } else {
         next.body = req.body;
+        next.body_stream = req.body_stream;
+        next.body_length = req.body_length;
         next.form = req.form;
     }
 

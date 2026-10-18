@@ -1,7 +1,7 @@
 package http.client
 
 use core.encoding.json
-use core {time, Result}
+use core {time, Result, io}
 
 RequestBuilder :: #distinct &_RequestBuilder
 
@@ -108,6 +108,20 @@ RequestBuilder.set_body :: #match {
     }
 }
 
+RequestBuilder.set_body_stream :: #match {
+    (rb: RequestBuilder, body: &io.Stream) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request->set_body_stream(body);
+        return rb;
+    }
+
+    (rb: RequestBuilder, body: &io.Stream, length: i64) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb);
+        r.request->set_body_stream(body, length);
+        return rb;
+    }
+}
+
 RequestBuilder.add_form_value :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
     r := cast(&_RequestBuilder, rb);
     if !r.form {
@@ -164,12 +178,24 @@ RequestBuilder.get_request :: (rb: RequestBuilder) -> &Request {
 }
 
 RequestBuilder.send :: (rb: RequestBuilder) -> Result(&Response, Error) {
+    return rb->dispatch(false);
+}
+
+RequestBuilder.open :: (rb: RequestBuilder) -> Result(&Response, Error) {
+    return rb->dispatch(true);
+}
+
+#local
+RequestBuilder.dispatch :: (rb: RequestBuilder, stream: bool) -> Result(&Response, Error) {
     rb->prepare();
 
     r := cast(&_RequestBuilder, rb);
-
-    // Send the request!
-    resp := r.client->send(r.request);
+    resp: Result(&Response, Error);
+    if stream {
+        resp = r.client->open(r.request);
+    } else {
+        resp = r.client->send(r.request);
+    }
 
     rb->cleanup();
     return resp;

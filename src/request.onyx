@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, alloc, io, string, iter, time}
+use core {package, alloc, io, string, iter, time, conv}
 use core.encoding.json
 use core.encoding.base64
 
@@ -9,7 +9,11 @@ Request :: struct {
     headers: Headers;
 
     body: ? [] u8;
+    body_stream: &io.Stream;
+    body_length: ? i64;
     form: &FormData;
+
+    stream_response: bool;
 
     url: Url;
     cookies: CookieJar;
@@ -105,6 +109,23 @@ Request.set_form_urlencoded :: (r: &Request, q: &Query) {
 Request.set_body :: #match {
     (r: &Request, body: str) {
         r.body = body;
+        r.body_stream = null;
+    }
+}
+
+Request.set_body_stream :: #match {
+    (r: &Request, body: &io.Stream) {
+        r.body_stream = body;
+        r.body_length = .{};
+        r.body = .{};
+        r.form = null;
+    }
+
+    (r: &Request, body: &io.Stream, length: i64) {
+        r.body_stream = body;
+        r.body_length = length;
+        r.body = .{};
+        r.form = null;
     }
 }
 
@@ -141,6 +162,28 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
 
     r.cookies->write_header(r.url, w);
 
+    if r.body_stream {
+        if r.body_length {
+            length := r.body_length->unwrap();
+            if length < 0 do return false;
+            r.headers->delete("transfer-encoding");
+            r.headers->set("Content-Length", core.tprintf("{}", length));
+        } else {
+            r.headers->delete("content-length");
+            r.headers->set("Transfer-Encoding", "chunked");
+        }
+
+        r.headers->write(w);
+        io.write(w, "\r\n");
+        io.writer_flush(w);
+        if io.writer_consume_error(w) != .None do return false;
+
+        if r.body_length {
+            return write_stream_length(w.stream, r.body_stream, r.body_length->unwrap());
+        }
+        return write_stream_chunked(w.stream, r.body_stream);
+    }
+
     body := r.body ?? do {
         if !r.form do return null_str;
 
@@ -171,5 +214,63 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
 Request.set_body :: (r: &Request, v: json.Value) {
     encoded_string := json.encode_string(v)!;
     r.body = encoded_string;
+    r.body_stream = null;
+}
+
+#local
+write_all :: (s: &io.Stream, buf: [] u8) -> bool {
+    off: u32 = 0;
+    while off < buf.count {
+        result := io.stream_write(s, buf[off .. buf.count]);
+        if result.Err do return false;
+        n := result.Ok->unwrap();
+        if n == 0 do return false;
+        off += n;
+    }
+    return true;
+}
+
+#local
+write_stream_length :: (dst, src: &io.Stream, length: i64) -> bool {
+    left := length;
+    buf: [1024] u8;
+    while left > 0 {
+        want: u32 = 1024;
+        if left < 1024 do want = ~~left;
+
+        result := io.stream_read(src, buf[0 .. want]);
+        if result.Err do return false;
+        n := result.Ok->unwrap();
+        if n == 0 do return false;
+        if !write_all(dst, buf[0 .. n]) do return false;
+        left -= cast(i64) n;
+    }
+    return true;
+}
+
+#local
+write_stream_chunked :: (dst, src: &io.Stream) -> bool {
+    buf: [1024] u8;
+    while true {
+        result := io.stream_read(src, buf);
+        if result.Err {
+            if result.Err->unwrap() != .EOF do return false;
+            break;
+        }
+        n := result.Ok->unwrap();
+        if n == 0 do break;
+        if !write_chunk(dst, buf[0 .. n]) do return false;
+    }
+    return write_all(dst, "0\r\n\r\n");
+}
+
+#local
+write_chunk :: (dst: &io.Stream, data: [] u8) -> bool {
+    hexbuf: [32] u8;
+    hex := conv.u64_to_str(cast(u64) data.count, 16, hexbuf);
+    if !write_all(dst, hex) do return false;
+    if !write_all(dst, "\r\n") do return false;
+    if !write_all(dst, data) do return false;
+    return write_all(dst, "\r\n");
 }
 
