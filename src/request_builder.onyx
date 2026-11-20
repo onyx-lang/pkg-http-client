@@ -28,10 +28,18 @@ request_builder :: (client: &Client) -> RequestBuilder {
     return RequestBuilder.{r}
 }
 
-RequestBuilder.set_method :: (rb: RequestBuilder, method: Method) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb)
-    r.request->set_method(method)
-    return rb
+RequestBuilder.set_method :: #match {
+    (rb: RequestBuilder, method: Method) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb)
+        r.request->set_method(method)
+        return rb
+    }
+
+    (rb: RequestBuilder, method: str) -> RequestBuilder {
+        r := cast(&_RequestBuilder, rb)
+        r.request->set_method(method)
+        return rb
+    }
 }
 
 RequestBuilder.set_url :: (rb: RequestBuilder, url: str) -> RequestBuilder {
@@ -76,9 +84,33 @@ RequestBuilder.set_query :: (rb: RequestBuilder, key, value: str) -> RequestBuil
     return rb
 }
 
+RequestBuilder.add_query :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb)
+    r.query->add(key, value)
+    return rb
+}
+
 RequestBuilder.set_timeout :: (rb: RequestBuilder, timeout: time.Duration) -> RequestBuilder {
     r := cast(&_RequestBuilder, rb)
     r.request.timeout = timeout
+    return rb
+}
+
+RequestBuilder.set_connect_timeout :: (rb: RequestBuilder, timeout: time.Duration) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb)
+    r.request.connect_timeout = timeout
+    return rb
+}
+
+RequestBuilder.set_read_timeout :: (rb: RequestBuilder, timeout: time.Duration) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb)
+    r.request.read_timeout = timeout
+    return rb
+}
+
+RequestBuilder.set_cancel :: (rb: RequestBuilder, flag: &CancelFlag) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb)
+    r.request.cancel = flag
     return rb
 }
 
@@ -129,6 +161,16 @@ RequestBuilder.add_form_value :: (rb: RequestBuilder, key, value: str) -> Reques
     }
 
     r.form->unwrap_ptr()->attach(key, value)
+    return rb
+}
+
+RequestBuilder.attach_file_path :: (rb: RequestBuilder, name: str, path: str, content_type: str) -> RequestBuilder {
+    r := cast(&_RequestBuilder, rb)
+    if !r.form {
+        r.form = FormData.{}
+    }
+
+    r.form->unwrap_ptr()->attach_path(name, path, content_type)
     return rb
 }
 

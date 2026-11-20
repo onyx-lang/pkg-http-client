@@ -1,6 +1,6 @@
 package http.client
 
-use core { package, string, conv, iter, io, random }
+use core { package, string, conv, iter, io, random, os }
 
 Version :: "0.1.0"
 
@@ -12,6 +12,19 @@ Error :: enum {
     ResponseParseFailed
     TooManyRedirects
     WriteFailed
+    UnrewindableBody
+    Cancelled
+}
+
+// A caller sets `cancelled` to abandon an in-flight exchange.
+CancelFlag :: struct {
+    cancelled: bool
+}
+
+// `error_for_status` reports the response that failed the check.
+StatusError :: struct {
+    status: u32
+    url: str
 }
 
 Method :: enum {
@@ -23,6 +36,8 @@ Method :: enum {
     Delete
     Trace
     Connect
+    Patch
+    Custom
 }
 
 Method.as_str :: (m: Method) => {
@@ -35,6 +50,8 @@ Method.as_str :: (m: Method) => {
         case .Delete  do return "DELETE"
         case .Trace   do return "TRACE"
         case .Connect do return "CONNECT"
+        case .Patch   do return "PATCH"
+        case .Custom  do return ""
     }
 
     return ""
@@ -64,6 +81,8 @@ Url :: struct {
     resource: str
     rawQuery: str
     fragment: str
+    user: str
+    pass: str
 }
 
 
@@ -96,8 +115,12 @@ destructure_url :: (url: str) -> ?Url {
     if !u do return .{}
 
     host_and_port := str.read_until(&u, #char "/")
-    if str.contains(host_and_port, #char "@") {
-        return .{}
+    user: str
+    pass: str
+    if at := str.index_of(host_and_port, #char "@"); at >= 0 {
+        info := host_and_port[0 .. at]
+        host_and_port = host_and_port[at + 1 .. host_and_port.count]
+        user, pass = str.bisect(info, #char ":")
     }
 
     host: str
@@ -127,7 +150,7 @@ destructure_url :: (url: str) -> ?Url {
     resource := "/"
     if u do resource = u
 
-    return Url.{ protocol, host, port, resource, query, fragment }
+    return Url.{ protocol, host, port, resource, query, fragment, user, pass }
 }
 
 #local
@@ -152,6 +175,11 @@ Protocol.is_https :: (p: Protocol) -> bool {
 }
 
 resolve_redirect :: (base: Url, location: str) -> str {
+    return normalize_joined(join_redirect(base, location))
+}
+
+#local
+join_redirect :: (base: Url, location: str) -> str {
     loc := str.strip_whitespace(location)
     if !loc do return ""
 
@@ -200,6 +228,91 @@ format_absolute :: (base: Url, path: str) -> str {
         return concat_strs(scheme, "://[", host, "]", port, path)
     }
     return concat_strs(scheme, "://", host, port, path)
+}
+
+format_url :: (u: Url) -> str {
+    path := u.resource
+    owned := ""
+    if u.rawQuery {
+        owned = concat_strs(u.resource, "?", u.rawQuery)
+        path = owned
+    }
+    out := format_absolute(u, path)
+    if owned do delete(&owned)
+    return out
+}
+
+#local
+normalize_joined :: (raw: str) -> str {
+    if !raw do return ""
+    parsed := destructure_url(raw)
+    if !parsed {
+        owned := raw
+        delete(&owned)
+        return ""
+    }
+
+    u := parsed->unwrap()
+    path := remove_dot_segments(u.resource)
+    u.resource = path
+    out := format_url(u)
+    delete(&path)
+    owned := raw
+    delete(&owned)
+    return out
+}
+
+// RFC 3986 remove_dot_segments. The result is a new string.
+remove_dot_segments :: (path: str) -> str {
+    input := path
+    out: [..] u8
+
+    while input.count > 0 {
+        if str.starts_with(input, "../") {
+            str.advance(&input, 3)
+        } elseif str.starts_with(input, "./") {
+            str.advance(&input, 2)
+        } elseif str.starts_with(input, "/./") {
+            str.advance(&input, 2)
+        } elseif input == "/." {
+            input = "/"
+        } elseif str.starts_with(input, "/../") {
+            str.advance(&input, 3)
+            pop_url_segment(&out)
+        } elseif input == "/.." {
+            input = "/"
+            pop_url_segment(&out)
+        } elseif input == "." || input == ".." {
+            input = ""
+        } else {
+            if input[0] == #char "/" {
+                out << #char "/"
+                str.advance(&input, 1)
+            }
+            seg := input
+            if idx := str.index_of(input, #char "/"); idx >= 0 {
+                seg = input[0 .. idx]
+                input = input[idx .. input.count]
+            } else {
+                input = ""
+            }
+            str.concat(&out, seg)
+        }
+    }
+
+    if out.count == 0 do out << #char "/"
+    return out
+}
+
+#local
+pop_url_segment :: (out: &[..] u8) {
+    if out.count == 0 do return
+    end := out.count
+    while end > 0 && out.data[end - 1] != #char "/" {
+        end -= 1
+    }
+    if end > 0 do end -= 1
+    out.count = end
 }
 
 copy_str :: (s: str) -> str {
@@ -302,6 +415,33 @@ QueryParam :: struct {
     key, value: str; 
 }
 
+Query.add :: (q: &Query, key, value: str) {
+    q.entries << .{
+        urlencode(key), urlencode(value),
+    }
+}
+
+// Append a pair that is already percent-encoded.
+Query.add_encoded :: (q: &Query, key, value: str) {
+    q.entries << .{ copy_str(key), copy_str(value) }
+}
+
+Query.parse_encoded :: (q: &Query, raw: str) {
+    rest := raw
+    while rest {
+        pair := rest
+        if idx := str.index_of(rest, #char "&"); idx >= 0 {
+            pair = rest[0 .. idx]
+            rest = rest[idx + 1 .. rest.count]
+        } else {
+            rest = ""
+        }
+        if !pair do continue
+        key, value := str.bisect(pair, #char "=")
+        q->add_encoded(key, value)
+    }
+}
+
 Query.set :: (q: &Query, key, value: str) {
     enc_key   := urlencode(key)
     enc_value := urlencode(value)
@@ -381,6 +521,7 @@ FormData :: struct {
         content_type: str
 
         data: str
+        path: str
     }
 }
 
@@ -412,10 +553,54 @@ FormData.attach_file :: (form: &FormData, name: str, filename: str, content_type
     }
 }
 
-FormData.write :: (form: &FormData, w: &io.Writer) {
+// `path` is read while the form is written. `filename` is the base name.
+FormData.attach_path :: (form: &FormData, name: str, path: str, content_type: str) {
+    kind := content_type
+    if !kind do kind = "application/octet-stream"
+    form.parts << .{
+        name = name,
+        filename = os.Path.basename(path),
+        content_type = kind,
+        path = path,
+    }
+}
+
+FormData.encoded_length :: (form: &FormData) -> ? i64 {
+    boundary := form->get_boundary()
+    marker := cast(i64) boundary.count + 2
+    total: i64 = 0
+
+    for & form.parts {
+        size: i64 = 0
+        if it.path {
+            st: os.FileStat
+            if !os.file_stat(it.path, &st) do return .{}
+            size = st.size
+        } else {
+            size = cast(i64) it.data.count
+        }
+
+        total += marker + 2
+        total += 38 + cast(i64) it.name.count + 1
+        if it.filename {
+            total += 12 + cast(i64) it.filename.count + 1 + 2
+            total += 14 + cast(i64) it.content_type.count + 2
+        } else {
+            total += 2
+        }
+        total += 2
+        total += size
+        total += 2
+    }
+
+    total += marker + 4
+    return total
+}
+
+FormData.write :: (form: &FormData, w: &io.Writer) -> bool {
     boundary := core.tprintf("--{}", form->get_boundary())
 
-    for& form.parts {
+    for & form.parts {
         w->write( boundary)
         w->write( "\r\n")
         w->write_format( "Content-Disposition: form-data; name={\"}", it.name)
@@ -429,10 +614,30 @@ FormData.write :: (form: &FormData, w: &io.Writer) {
 
         w->write( "\r\n")
 
-        w->write( it.data)
+        if it.path {
+            opened := os.File.open(it.path, .Read)
+            if opened.Err do return false
+            file := opened.Ok->unwrap()
+            defer os.File.close(&file)
+
+            buf: [8192] u8
+            while true {
+                result := io.Stream.read(&file, buf)
+                if result.Err as err {
+                    if err == .EOF do break
+                    return false
+                }
+                n := result.Ok->unwrap()
+                if n == 0 do break
+                w->write(buf[0 .. n])
+            }
+        } else {
+            w->write( it.data)
+        }
         w->write( "\r\n")
     }
 
     w->write( boundary)
     w->write( "--\r\n")
+    return w->consume_error() == .None
 }

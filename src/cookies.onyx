@@ -77,6 +77,17 @@ CookieJar.set :: (c: &CookieJar, cookie: Cookie) {
     c.cookies[c->map_key(new_cookie)] = new_cookie
 }
 
+CookieJar.drop_any_host :: (c: &CookieJar) {
+    doomed: [..] str
+    defer delete(&doomed)
+
+    for iter.as_iter(&c.cookies) {
+        if it.value.any_host do doomed << it.key
+    }
+
+    for doomed do c.cookies->remove(it)
+}
+
 CookieJar.delete :: (c: &CookieJar, key: str) {
     doomed: [..] str
     defer delete(&doomed)
@@ -167,6 +178,7 @@ CookieJar.ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
             if attr.count > 0 && attr[0] == #char "." do str.advance(&attr, 1)
             if !attr do continue
             if !domain_matches(url.host, attr) do return
+            if is_public_suffix(attr) do return
             domain = attr
             has_domain = true
         } elseif str.equal_insensitive(name, "path") {
@@ -277,4 +289,46 @@ parse_http_date :: (s: str) -> i64 {
     }
 
     return 0
+}
+
+// Single-label names are public suffixes (`com`). The lists cover the
+// multi-label suffixes callers actually hit. A domain equal to one of
+// these, or one label under a wildcard parent, is rejected.
+#local
+PUBLIC_SUFFIXES :: str.[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "ltd.uk", "plc.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au",
+    "co.jp", "or.jp", "ne.jp", "ac.jp",
+    "co.kr", "or.kr", "ne.kr",
+    "com.br", "com.mx", "com.ar", "com.tr", "com.cn", "com.tw", "com.hk", "com.sg", "com.my",
+    "co.nz", "org.nz", "net.nz", "co.za", "co.in", "net.in", "org.in",
+    "com.co", "com.ng", "co.ke", "com.ua", "com.pl", "com.pt", "com.es",
+    "github.io", "blogspot.com", "appspot.com", "herokuapp.com",
+    "azurewebsites.net", "cloudfront.net",
+]
+
+#local
+WILDCARD_SUFFIXES :: str.[
+    "amazonaws.com", "herokuapp.com", "github.io",
+]
+
+is_public_suffix :: (domain: str) -> bool {
+    if !domain do return true
+    if !str.contains(domain, #char ".") do return true
+
+    for PUBLIC_SUFFIXES {
+        if str.equal_insensitive(domain, it) do return true
+    }
+    for WILDCARD_SUFFIXES {
+        if str.equal_insensitive(domain, it) do return true
+        suffix := it
+        if domain.count > suffix.count + 1 && domain[domain.count - suffix.count - 1] == #char "." {
+            tail := domain[domain.count - suffix.count .. domain.count]
+            if str.equal_insensitive(tail, suffix) {
+                rest := domain[0 .. domain.count - suffix.count - 1]
+                if !str.contains(rest, #char ".") do return true
+            }
+        }
+    }
+    return false
 }

@@ -11,8 +11,24 @@ Client :: struct {
     cookies: CookieJar = CookieJar.make()
 
     default_timeout := 10 * time.SECOND
+    connect_timeout := 10 * time.SECOND
+    read_timeout := 10 * time.SECOND
+    idle_timeout := 90 * time.SECOND
 
     max_redirects := 10
+
+    // Empty proxy uses HTTP_PROXY / HTTPS_PROXY / NO_PROXY when use_env_proxy is set.
+    proxy: str
+    use_env_proxy := true
+
+    // Empty ca_pem uses the bundled Mozilla store. insecure_skip_verify skips it.
+    ca_pem: str
+    insecure_skip_verify := false
+    server_name: str
+    client_cert_pem: str
+    client_key_pem: str
+
+    cancel: &CancelFlag
 }
 
 Client.free :: (c: &Client) {
@@ -41,6 +57,9 @@ send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response,
 
     followed := 0
     while true {
+        apply_client_options(c, current)
+        if request_cancelled(current) do return .{ Err = .Cancelled }
+
         prev := current.stream_response
         current.stream_response = stream
         resp := c.transport->send_request(current)
@@ -48,6 +67,7 @@ send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response,
         if resp.Err do return resp
 
         parsed := resp.Ok->unwrap()
+        parsed.url = format_url(current.url)
         if parsed.headers->has("set-cookie") {
             c.cookies->ingress_from_headers(parsed.headers, current.url)
         }
@@ -70,7 +90,8 @@ send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response,
         next_method := method_for_redirect(parsed.status, current.method)
         if next_method == current.method && current.body_stream {
             if current.body_stream->seek(0, io.SeekFrom.Start) != .None {
-                return resp
+                parsed->free()
+                return .{ Err = .UnrewindableBody }
             }
         }
 
@@ -92,6 +113,9 @@ Client.new_request :: #match {
         req.headers = c.default_headers->clone()
         req.cookies = c.cookies->clone()
         req.timeout = c.default_timeout
+        req.connect_timeout = c.connect_timeout
+        req.read_timeout = c.read_timeout
+        req.cancel = c.cancel
         return req
     },
 
@@ -100,6 +124,9 @@ Client.new_request :: #match {
         req.headers = c.default_headers->clone()
         req.cookies = c.cookies->clone()
         req.timeout = c.default_timeout
+        req.connect_timeout = c.connect_timeout
+        req.read_timeout = c.read_timeout
+        req.cancel = c.cancel
         return req
     }
 }
@@ -139,8 +166,25 @@ is_redirect_status :: (status: u32) -> bool {
 }
 
 method_for_redirect :: (status: u32, method: Method) -> Method {
+    if method == .Get || method == .Head do return method
     if status == 301 || status == 302 || status == 303 do return .Get
     return method
+}
+
+idempotent_method :: (method: Method) -> bool {
+    if method == .Get || method == .Head || method == .Options do return true
+    if method == .Trace || method == .Put || method == .Delete do return true
+    return false
+}
+
+// A reused connection is retried when the send itself failed, or when an
+// idempotent method failed before a response could be trusted.
+should_retry_reused :: (method: Method, custom: str, streamed: bool, err: Error) -> bool {
+    if streamed do return false
+    if err == .WriteFailed do return true
+    if custom do return false
+    if !idempotent_method(method) do return false
+    return err == .Timeout || err == .ResponseParseFailed || err == .ConnectionFailed
 }
 
 #local
@@ -148,23 +192,33 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
     parsed := destructure_url(next_url)->unwrap()
     method := method_for_redirect(status, req.method)
 
+    cross_host := !str.equal_insensitive(req.url.host, parsed.host)
+
     next := alloc.on_heap(Request.{
         method = method,
         headers = req.headers->clone(),
         url = parsed,
         cookies = c.cookies->clone(),
         timeout = req.timeout,
+        connect_timeout = req.connect_timeout,
+        read_timeout = req.read_timeout,
         url_storage = next_url,
+        cancel = req.cancel,
     })
 
+    if cross_host do next.cookies->drop_any_host()
+
     for iter.as_iter(&req.cookies.cookies) {
+        if cross_host && it.value.any_host do continue
         next.cookies->set(it.value)
     }
 
-    if method == .Get && req.method != .Get {
+    method_changed := method != req.method
+    if method_changed {
         next.body = .{}
         next.body_stream = null
         next.form = null
+        next.custom_method = ""
         next.headers->delete("content-type")
         next.headers->delete("content-length")
         next.headers->delete("transfer-encoding")
@@ -173,10 +227,13 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
         next.body_stream = req.body_stream
         next.body_length = req.body_length
         next.form = req.form
+        next.custom_method = req.custom_method
     }
 
-    if !str.equal_insensitive(req.url.host, parsed.host) {
+    if cross_host {
         next.headers->delete("authorization")
+        next.headers->delete("cookie")
+        next.headers->delete("proxy-authorization")
     }
 
     return next
@@ -202,6 +259,57 @@ get :: (url: str, query: &Query = null) -> Result(&Response, Error) {
     default_client_init_once->exec(init_default_client)
 
     return default_client->get(url, query)
+}
+
+apply_client_options :: (c: &Client, req: &Request) {
+    req.idle_timeout = c.idle_timeout
+    req.ca_pem = c.ca_pem
+    req.insecure = c.insecure_skip_verify
+    req.server_name = c.server_name
+    req.client_cert_pem = c.client_cert_pem
+    req.client_key_pem = c.client_key_pem
+    req.proxy = c.proxy
+    req.use_env_proxy = c.use_env_proxy
+    if !req.cancel do req.cancel = c.cancel
+    if cast(i64) req.connect_timeout == 0 do req.connect_timeout = c.connect_timeout
+    if cast(i64) req.read_timeout == 0 do req.read_timeout = c.read_timeout
+    if req.url.user && !req.headers->has("authorization") {
+        req->set_basic_auth(req.url.user, req.url.pass)
+    }
+}
+
+request_cancelled :: (req: &Request) -> bool {
+    if req.cancel && req.cancel.cancelled do return true
+    return false
+}
+
+Client.head :: (c: &Client, url: str) -> Result(&Response, Error) {
+    req := c->new_request(.Head, url)
+    defer req->free()
+    return c->send(req)
+}
+
+Client.put :: (c: &Client, url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
+    return c->send_body(.Put, url, content_type, data)
+}
+
+Client.patch :: (c: &Client, url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
+    return c->send_body(.Patch, url, content_type, data)
+}
+
+Client.delete :: (c: &Client, url: str) -> Result(&Response, Error) {
+    req := c->new_request(.Delete, url)
+    defer req->free()
+    return c->send(req)
+}
+
+#local
+Client.send_body :: (c: &Client, method: Method, url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
+    req := c->new_request(method, url)
+    req.headers->set("content-type", content_type)
+    req.body = data
+    defer req->free()
+    return c->send(req)
 }
 
 post :: (url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {

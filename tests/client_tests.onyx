@@ -4,7 +4,8 @@ package http.client
 
 use core
 use core.test
-use core {io, string, Result}
+use core.os
+use core {io, string, Result, time, net}
 
 @core.test.test.{"url"}
 url_parses_host_port_query :: (t: &core.test.T) {
@@ -36,7 +37,11 @@ url_parses_ipv6 :: (t: &core.test.T) {
 @core.test.test.{"url rejects"}
 url_rejects_bad_input :: (t: &core.test.T) {
     t->assert(!destructure_url("http://example.com:abc/"), "bad port")
-    t->assert(!destructure_url("http://user:pass@example.com/"), "userinfo")
+    authed := destructure_url("http://user:pass@example.com/a")->unwrap()
+    t->assert(authed.user == "user", "userinfo user")
+    t->assert(authed.pass == "pass", "userinfo pass")
+    t->assert(authed.host == "example.com", "userinfo host")
+    t->assert(authed.resource == "/a", "userinfo path")
     t->assert(!destructure_url("ftp://example.com/"), "scheme")
     t->assert(!destructure_url("http://[::1/"), "unclosed ipv6")
 }
@@ -86,6 +91,20 @@ redirect_urls :: (t: &core.test.T) {
     t->assert(method_for_redirect(303, .Put) == .Get, "303")
     t->assert(method_for_redirect(307, .Post) == .Post, "307")
     t->assert(method_for_redirect(308, .Put) == .Put, "308")
+    t->assert(method_for_redirect(301, .Head) == .Head, "301 head")
+    t->assert(method_for_redirect(303, .Head) == .Head, "303 head")
+    t->assert(method_for_redirect(301, .Patch) == .Get, "301 patch")
+    t->assert(method_for_redirect(307, .Patch) == .Patch, "307 patch")
+
+    dot := resolve_redirect(base, "../c")
+    defer delete(&dot)
+    t->assert(dot == "http://example.com/c", "dot segments")
+
+    t->assert(!should_retry_reused(.Post, "", false, .Timeout), "post timeout")
+    t->assert(should_retry_reused(.Post, "", false, .WriteFailed), "post write")
+    t->assert(should_retry_reused(.Get, "", false, .Timeout), "get timeout")
+    t->assert(!should_retry_reused(.Post, "", true, .WriteFailed), "streamed")
+    t->assert(!should_retry_reused(.Custom, "PROPFIND", false, .Timeout), "custom")
 }
 
 @core.test.test.{"response"}
@@ -261,6 +280,175 @@ stream_request_write :: (t: &core.test.T) {
     t->assert(str.contains(chunked, "Transfer-Encoding: chunked\r\n"), "chunked header")
     t->assert(!str.contains(chunked, "Content-Length"), "no length")
     t->assert(str.contains(chunked, "\r\n\r\n5\r\nhello\r\n0\r\n\r\n"), "chunk framing")
+}
+
+@core.test.test.{"api gaps"}
+api_gaps :: (t: &core.test.T) {
+    jar := CookieJar.make()
+    defer jar->free()
+    headers := Headers.make()
+    defer headers->free()
+    headers->add("set-cookie", "a=1; Domain=com")
+    headers->add("set-cookie", "b=2; Domain=co.uk")
+    headers->add("set-cookie", "c=3; Domain=example.com")
+    url := destructure_url("https://example.com/")->unwrap()
+    jar->ingress_from_headers(headers, url)
+    header := capture_cookie_header(&jar, url)
+    defer delete(&header)
+    t->assert(!str.contains(header, "a=1"), "public suffix tld")
+    t->assert(!str.contains(header, "b=2"), "public suffix multi")
+    t->assert(str.contains(header, "c=3"), "registrable domain")
+    t->assert(is_public_suffix("com"), "com")
+    t->assert(is_public_suffix("foo.amazonaws.com"), "wildcard")
+    t->assert(!is_public_suffix("example.com"), "registrable")
+
+    req := new_request(.Get, "http://example.com/a?b=1")
+    defer req->free()
+    req.headers = Headers.make()
+    req.cookies = CookieJar.make()
+    q := Query.{}
+    defer q->free()
+    q->add("id", "1")
+    q->add("id", "2")
+    req->set_query(&q)
+    t->assert(req.url.rawQuery == "b=1&id=1&id=2", "merged query")
+
+    req->set_method("PROPFIND")
+    w, sb := io.Writer.string_builder()
+    t->assert(req->write(&w), "custom write")
+    t->assert(str.starts_with(str.as_str(sb), "PROPFIND /a?"), "custom verb")
+    t->assert(req.method->as_str() == "" || req->verb() == "PROPFIND", "verb")
+
+    patch := new_request(.Patch, "http://example.com/a")
+    defer patch->free()
+    t->assert(patch.method->as_str() == "PATCH", "patch")
+
+    resp := Response.make()
+    defer resp->free()
+    resp.status = 404
+    resp.url = copy_str("http://example.com/missing")
+    failed := resp->error_for_status()
+    t->assert(failed->is_err(), "status error")
+    if failed.Err as err {
+        t->assert(err.status == 404, "status code")
+        t->assert(err.url == "http://example.com/missing", "status url")
+    }
+    resp.status = 204
+    ok := resp->error_for_status()
+    t->assert(ok->is_ok(), "204 ok")
+
+    t->assert(no_proxy_matches("example.com", "example.com, other"), "no proxy exact")
+    t->assert(no_proxy_matches("a.example.com", ".example.com"), "no proxy suffix")
+    t->assert(no_proxy_matches("example.com", "*"), "no proxy star")
+    t->assert(!no_proxy_matches("example.com", "other.com"), "no proxy miss")
+
+    form := FormData.{}
+    defer form->free()
+    form->attach("a", "hi")
+    length := form->encoded_length()
+    length_ok := false
+    if length do length_ok = true
+    t->assert(length_ok, "form length")
+    fw, fsb := io.Writer.string_builder()
+    t->assert(form->write(&fw), "form write")
+    fw->flush()
+    written := str.as_str(fsb)
+    if length do t->assert(cast(i64) written.count == length->unwrap(), "form length matches")
+    t->assert(str.contains(written, "name=\"a\""), "form name")
+    t->assert(str.contains(written, "hi"), "form value")
+
+    path := "/tmp/onyx-http-client-multipart.txt"
+    payload := "file-bytes"
+    t->assert(os.File.write_contents(path, payload), "write temp")
+    defer os.File.remove(path)
+    file_form := FormData.{}
+    defer file_form->free()
+    file_form->attach_path("f", path, "text/plain")
+    file_length := file_form->encoded_length()
+    file_writer, file_builder := io.Writer.string_builder()
+    t->assert(file_form->write(&file_writer), "path write")
+    file_writer->flush()
+    file_written := str.as_str(file_builder)
+    if file_length do t->assert(cast(i64) file_written.count == file_length->unwrap(), "path length")
+    t->assert(str.contains(file_written, "filename=\"onyx-http-client-multipart.txt\""), "filename")
+    t->assert(str.contains(file_written, payload), "file bytes")
+}
+
+@core.test.test.{"dial"}
+dial_respects_deadline :: (t: &core.test.T) {
+    refused := dial_timeout("127.0.0.1", 1, time.Instant.now() + 1000 * time.MILLISECOND)
+    if refused.Ok as sock {
+        net.socket_close(&sock)
+    }
+    t->assert(refused->is_err(), "refused")
+
+    start := time.Instant.now()
+    blackhole := dial_timeout("192.0.2.1", 81, start + 250 * time.MILLISECOND)
+    elapsed := time.Instant.now() - start
+    t->assert(blackhole->is_err(), "blackhole")
+    t->assert(elapsed < 2 * time.SECOND, "blackhole bounded")
+    if blackhole.Err as err {
+        t->assert(err == .Timeout, "blackhole timeout")
+    }
+}
+
+@core.test.test.{"gzip"}
+gunzip_vectors :: (t: &core.test.T) {
+    hello := u8.[
+        31, 139, 8, 0, 69, 210, 255, 106, 2, 255, 203, 72, 205, 201, 201, 87, 72, 175, 202, 44, 0, 0, 25, 106, 210, 223, 10, 0, 0, 0,
+    ]
+    decoded := gunzip(hello)
+    hello_ok := false
+    if decoded do hello_ok = true
+    t->assert(hello_ok, "hello decodes")
+    if decoded {
+        body := decoded->unwrap()
+        defer delete(&body)
+        t->assert(body == "hello gzip", "hello bytes")
+    }
+
+    empty := u8.[31, 139, 8, 0, 69, 210, 255, 106, 2, 255, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    empty_body := gunzip(empty)
+    empty_ok := false
+    if empty_body do empty_ok = true
+    t->assert(empty_ok, "empty decodes")
+    if empty_body {
+        body := empty_body->unwrap()
+        defer delete(&body)
+        t->assert(body.count == 0, "empty payload")
+    }
+
+    repeated := u8.[
+        31, 139, 8, 0, 69, 210, 255, 106, 2, 255, 75, 76, 74, 78, 196, 134, 0, 55, 15, 32, 1, 24, 0, 0, 0,
+    ]
+    rep := gunzip(repeated)
+    rep_ok := false
+    if rep do rep_ok = true
+    t->assert(rep_ok, "repeat decodes")
+    if rep {
+        body := rep->unwrap()
+        defer delete(&body)
+        t->assert(body == "abcabcabcabcabcabcabcabc", "repeat bytes")
+    }
+
+    fox := u8.[
+        31, 139, 8, 0, 69, 210, 255, 106, 2, 255, 11, 201, 72, 85, 40, 44, 205, 76, 206, 86, 72, 42, 202, 47, 207, 83, 72, 203, 175, 80, 200, 42, 205, 45, 40, 86, 200, 47, 75, 45, 82, 40, 1, 74, 231, 36, 86, 85, 42, 164, 228, 167, 235, 41, 132, 140, 42, 30, 85, 60, 170, 152, 218, 138, 1, 230, 74, 102, 176, 132, 3, 0, 0,
+    ]
+    fox_body := gunzip(fox)
+    fox_ok := false
+    if fox_body do fox_ok = true
+    t->assert(fox_ok, "dynamic decodes")
+    if fox_body {
+        body := fox_body->unwrap()
+        defer delete(&body)
+        t->assert(body.count == 900, "dynamic length")
+        t->assert(str.starts_with(body, "The quick brown fox"), "dynamic prefix")
+    }
+
+    t->assert(content_is_gzip("gzip"), "gzip token")
+    t->assert(content_is_gzip("GZip, deflate"), "gzip list")
+    t->assert(!content_is_gzip("deflate"), "not deflate")
+    t->assert(!gunzip("not gzip"), "rejects plain")
 }
 
 @core.test.test.{"stream response"}

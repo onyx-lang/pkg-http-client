@@ -1,0 +1,104 @@
+package http.client
+
+use core {os}
+
+Resolved_Proxy :: struct {
+    enabled: bool
+    url: Url
+    storage: str
+}
+
+Resolved_Proxy.free :: (p: &Resolved_Proxy) {
+    if p.storage {
+        owned := p.storage
+        delete(&owned)
+        p.storage = ""
+    }
+}
+
+// `list` is a comma-separated NO_PROXY value. `*` matches every host.
+// A leading dot matches that domain and its subdomains.
+no_proxy_matches :: (host: str, list: str) -> bool {
+    rest := list
+    while rest {
+        part := rest
+        if idx := str.index_of(rest, #char ","); idx >= 0 {
+            part = rest[0 .. idx]
+            rest = rest[idx + 1 .. rest.count]
+        } else {
+            rest = ""
+        }
+        part = str.strip_whitespace(part)
+        if !part do continue
+        if part == "*" do return true
+        if str.equal_insensitive(part, host) do return true
+
+        suffix := part
+        if suffix[0] == #char "." do str.advance(&suffix, 1)
+        if !suffix do continue
+        if host.count <= suffix.count do continue
+        if host[host.count - suffix.count - 1] != #char "." do continue
+        tail := host[host.count - suffix.count .. host.count]
+        if str.equal_insensitive(tail, suffix) do return true
+    }
+    return false
+}
+
+#local
+read_env :: (key: str) -> str {
+    found := os.env(key)
+    if !found do return ""
+    return found->unwrap()
+}
+
+#local
+first_env :: (keys: [] str) -> str {
+    for keys {
+        value := read_env(it)
+        if value do return value
+    }
+    return ""
+}
+
+proxy_url_from_env :: (https: bool) -> str {
+    if https {
+        return first_env(.["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"])
+    }
+    return first_env(.["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+}
+
+// `explicit` wins over the environment. NO_PROXY is honored when `use_env` is set.
+// The returned storage owns the proxy URL; Url fields point into it.
+resolve_proxy :: (target: Url, explicit: str, use_env: bool) -> Resolved_Proxy {
+    result: Resolved_Proxy
+    if use_env {
+        no_proxy := read_env("NO_PROXY")
+        if !no_proxy do no_proxy = read_env("no_proxy")
+        defer if no_proxy {
+            owned := no_proxy
+            delete(&owned)
+        }
+
+        if no_proxy && no_proxy_matches(target.host, no_proxy) do return result
+    }
+
+    storage := ""
+    if explicit {
+        storage = copy_str(explicit)
+    } elseif use_env {
+        storage = proxy_url_from_env(target.protocol->is_https())
+    }
+    if !storage do return result
+
+    parsed := destructure_url(storage)
+    if !parsed {
+        owned := storage
+        delete(&owned)
+        return result
+    }
+
+    result.enabled = true
+    result.url = parsed->unwrap()
+    result.storage = storage
+    return result
+}

@@ -14,11 +14,30 @@ Request :: struct {
     form: &FormData
 
     stream_response: bool
+    use_absolute_form: bool
 
     url: Url
     cookies: CookieJar
 
     timeout := 10 * time.SECOND
+    connect_timeout: time.Duration
+    read_timeout: time.Duration
+    idle_timeout: time.Duration
+
+    cancel: &CancelFlag
+
+    // TLS and proxy are copied from the Client for the attempt.
+    ca_pem: str
+    insecure: bool
+    server_name: str
+    client_cert_pem: str
+    client_key_pem: str
+    proxy: str
+    use_env_proxy: bool
+    proxy_authorization: str
+
+    custom_method: str
+    owned_method: str
 
     owned_query: str
     owned_body: str
@@ -58,6 +77,7 @@ Request.free :: (r: &Request) {
 
     if r.owned_query do delete(&r.owned_query)
     if r.owned_body do delete(&r.owned_body)
+    if r.owned_method do delete(&r.owned_method)
     if r.url_storage do delete(&r.url_storage)
 
     cfree(r)
@@ -70,8 +90,24 @@ Request.set_url :: (r: &Request, url: str) {
     }
 }
 
-Request.set_method :: (r: &Request, method: Method) {
-    r.method = method
+Request.set_method :: #match {
+    (r: &Request, method: Method) {
+        r.method = method
+        if r.owned_method do delete(&r.owned_method)
+        r.custom_method = ""
+    }
+
+    (r: &Request, method: str) {
+        if r.owned_method do delete(&r.owned_method)
+        r.owned_method = copy_str(method)
+        r.custom_method = r.owned_method
+        r.method = .Custom
+    }
+}
+
+Request.verb :: (r: &Request) -> str {
+    if r.custom_method do return r.custom_method
+    return r.method->as_str()
 }
 
 Request.set_cookie :: (r: &Request, key, value: str) {
@@ -79,9 +115,34 @@ Request.set_cookie :: (r: &Request, key, value: str) {
 }
 
 Request.set_query :: (r: &Request, q: &Query) {
-    if r.owned_query do delete(&r.owned_query)
+    if q.entries.count == 0 do return
 
-    encoded := q->encode()
+    combined: Query
+    defer combined->free()
+    if r.url.rawQuery do combined->parse_encoded(r.url.rawQuery)
+
+    kept: [..] QueryParam
+    for & existing in combined.entries {
+        replaced := false
+        for & incoming in q.entries {
+            if incoming.key == existing.key do replaced = true
+        }
+        if replaced {
+            delete(&existing.key)
+            delete(&existing.value)
+        } else {
+            kept << *existing
+        }
+    }
+    delete(&combined.entries)
+    combined.entries = kept
+
+    for & q.entries {
+        combined.entries << .{ copy_str(it.key), copy_str(it.value) }
+    }
+
+    if r.owned_query do delete(&r.owned_query)
+    encoded := combined->encode()
     r.owned_query = copy_str(encoded)
     r.url.rawQuery = r.owned_query
 }
@@ -140,9 +201,22 @@ Request.set_form :: (r: &Request, form: &FormData) {
 Request.write :: (r: &Request, w: &io.Writer) -> bool {
     w->consume_error()
 
-    w->write_format( "{} {}",
-        str.as_str(r.method),
-        r.url.resource)
+    w->write_format( "{} ", r->verb())
+    if r.use_absolute_form {
+        scheme := "https" if r.url.protocol->is_https() else "http"
+        w->write_format( "{}://", scheme)
+        if str.contains(r.url.host, #char ":") {
+            w->write_format( "[{}]", r.url.host)
+        } else {
+            w->write( r.url.host)
+        }
+        if r.url.port != 0 && r.url.port != r.url.protocol->default_port() {
+            w->write_format( ":{}", r.url.port)
+        }
+        w->write( r.url.resource)
+    } else {
+        w->write( r.url.resource)
+    }
     
     if r.url.rawQuery {
         w->write_format( "?{}", r.url.rawQuery)
@@ -161,6 +235,10 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
     w->write( "\r\n")
 
     r.cookies->write_header(r.url, w)
+
+    if r.proxy_authorization {
+        w->write_format( "Proxy-Authorization: {}\r\n", r.proxy_authorization)
+    }
 
     if r.body_stream {
         if r.body_length {
@@ -182,6 +260,17 @@ Request.write :: (r: &Request, w: &io.Writer) -> bool {
             return write_stream_length(w.stream, r.body_stream, r.body_length->unwrap())
         }
         return write_stream_chunked(w.stream, r.body_stream)
+    }
+
+    if r.form && !r.body {
+        length := r.form->encoded_length()
+        if !length do return false
+        r.headers->set("Content-Length", core.tprintf("{}", length->unwrap()))
+        r.headers->write(w)
+        w->write( "\r\n")
+        if !r.form->write(w) do return false
+        w->flush()
+        return w->consume_error() == .None
     }
 
     body := r.body ?? do {

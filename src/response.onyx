@@ -1,6 +1,6 @@
 package http.client
 
-use core {conv, io, string, memory, Result}
+use core {conv, io, string, memory, Result, tprintf}
 use core.encoding.json
 
 Response :: struct {
@@ -11,6 +11,8 @@ Response :: struct {
     body_pos: u32
     must_close: bool
     live: &Streamed_Body
+    url: str
+    gzip_done: bool
 }
 
 Response.make :: () => new(#Self)
@@ -26,11 +28,16 @@ Response.free :: (r: &Response) {
 
     r.headers->free()
     delete(&r.body)
+    if r.url do delete(&r.url)
     cfree(r)
 }
 
 Response.read :: (r: &Response, dest: [] u8) -> Result(u32, Error) {
-    if r.live do return read_live(r, dest)
+    if r.live && !r.gzip_done && content_is_gzip(r.headers->get("content-encoding")) {
+        if !slurp_gzip(r) do return .{ Err = .ResponseParseFailed }
+        r.gzip_done = true
+    }
+    if r.live && !r.live.finished do return read_live(r, dest)
     if r.body_pos >= r.body.count do return .{ Ok = 0 }
 
     n := r.body.count - r.body_pos
@@ -73,6 +80,11 @@ Response.is_client_error :: (r: &Response) -> bool {
 
 Response.is_server_error :: (r: &Response) -> bool {
     return r.status >= 500 && r.status < 600
+}
+
+Response.error_for_status :: (r: &Response) -> Result(&Response, StatusError) {
+    if r.status < 400 do return .{ Ok = r }
+    return .{ Err = .{ status = r.status, url = r.url } }
 }
 
 Response.as_json :: (r: &Response) => json.decode(r.body)
@@ -179,7 +191,54 @@ parse_one :: (r: &io.Reader, method: Method, resp: &Response, read_body: bool) -
     }
 
     resp.body = body
+    if !decode_gzip(resp) do return .{ Err = .ResponseParseFailed }
     return .{ Ok = true }
+}
+
+#local
+decode_gzip :: (resp: &Response) -> bool {
+    if resp.gzip_done do return true
+    if !content_is_gzip(resp.headers->get("content-encoding")) do return true
+
+    decoded := gunzip(resp.body)
+    if !decoded do return false
+
+    delete(&resp.body)
+    resp.body = decoded->unwrap()
+    resp.gzip_done = true
+    resp.headers->delete("content-encoding")
+    resp.headers->set("content-length", tprintf("{}", resp.body.count))
+    return true
+}
+
+#local
+slurp_gzip :: (r: &Response) -> bool {
+    out: [..] u8
+    buf: [1024] u8
+    while true {
+        result := read_live(r, buf)
+        if result.Err {
+            delete(&out)
+            return false
+        }
+        n := result.Ok->unwrap()
+        if n == 0 do break
+
+        Array.ensure_capacity(&out, out.count + n)
+        memory.copy(out.data + out.count, &buf[0], n)
+        out.count += n
+    }
+
+    decoded := gunzip(out)
+    delete(&out)
+    if !decoded do return false
+
+    delete(&r.body)
+    r.body = decoded->unwrap()
+    r.body_pos = 0
+    r.headers->delete("content-encoding")
+    r.headers->set("content-length", tprintf("{}", r.body.count))
+    return true
 }
 
 Body_Kind :: enum {

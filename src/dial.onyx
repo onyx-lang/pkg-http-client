@@ -1,0 +1,68 @@
+package http.client
+
+use core {net, io, time, Result}
+use runtime
+
+poll_fd :: (fd: i32, ev: io.PollEvent, timeout_ms: i32) -> io.PollEvent {
+    fds: [1] runtime.platform.PollDescription
+    fds[0].fd = cast(u64) fd
+    fds[0].in_events = ev
+    fds[0].out_events = .None
+    runtime.platform.__poll(fds[0 .. 1], timeout_ms)
+    return fds[0].out_events
+}
+
+remaining_ms :: (deadline: time.Instant) -> i32 {
+    if cast(i64) deadline == 0 do return 0x7fffffff
+    left := deadline - time.Instant.now()
+    if left <= 0 do return 0
+    ms := left->as_ms()
+    if ms > 2000000000 do ms = 2000000000
+    if ms <= 0 do ms = 1
+    return ~~ms
+}
+
+// TCP connect bounded by `deadline`. This follows `net.dial`: resolve the host,
+// then connect to a concrete address. DNS lookup is still unbounded; the
+// timeout covers the handshake and a deadline that has already passed.
+dial_timeout :: (host: str, port: u32, deadline: time.Instant) -> Result(net.Socket, Error) {
+    if cast(i64) deadline != 0 && deadline <= time.Instant.now() {
+        return .{ Err = .Timeout }
+    }
+
+    addrs := net.resolve(host, ~~port, 10)
+    defer delete(&addrs)
+
+    for &addr in addrs {
+        if addr.type != .Stream do continue
+
+        created := net.socket_create(addr.family, .Stream, .ANY)
+        if created.Err do return .{ Err = .ConnectionFailed }
+        sock := created.Ok->unwrap()
+        sock->option(.NonBlocking, true)
+
+        err := sock->connect(&addr.addr)
+        if err == .None {
+            sock->option(.NonBlocking, false)
+            return .{ Ok = sock }
+        }
+
+        ms := remaining_ms(deadline)
+        if ms == 0 {
+            net.socket_close(&sock)
+            return .{ Err = .Timeout }
+        }
+
+        ev := poll_fd(cast(i32) sock.handle, .Write, ms)
+        if ev == .Write {
+            sock->option(.NonBlocking, false)
+            return .{ Ok = sock }
+        }
+
+        net.socket_close(&sock)
+        if ev == .None do return .{ Err = .Timeout }
+        return .{ Err = .ConnectionFailed }
+    }
+
+    return .{ Err = .ConnectionFailed }
+}

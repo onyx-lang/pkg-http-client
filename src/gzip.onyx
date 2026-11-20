@@ -1,0 +1,348 @@
+package http.client
+
+// Gzip wrapper around a DEFLATE stream (RFC 1952 / RFC 1951).
+// Other content encodings are left for the caller.
+
+#local MAX_BITS :: 15
+#local MAX_SYMS :: 320
+
+Huffman :: struct {
+    counts: [16] i32
+    symbols: [MAX_SYMS] i32
+}
+
+#local
+Bit_In :: struct {
+    data: [] u8
+    pos: u32
+    bitbuf: u32
+    bitcnt: i32
+    failed: bool
+}
+
+#local
+bits :: (b: &Bit_In, need: i32) -> i32 {
+    val := b.bitbuf
+    while b.bitcnt < need {
+        if b.pos >= b.data.count {
+            b.failed = true
+            return -1
+        }
+        val |= cast(u32) b.data[b.pos] << cast(u32) b.bitcnt
+        b.pos += 1
+        b.bitcnt += 8
+    }
+
+    b.bitbuf = val >> cast(u32) need
+    b.bitcnt -= need
+    return ~~(val & ((1 << cast(u32) need) - 1))
+}
+
+#local
+build_huffman :: (h: &Huffman, lengths: [] i32) -> bool {
+    for i in 0 .. 16 do h.counts[i] = 0
+    for i in 0 .. MAX_SYMS do h.symbols[i] = 0
+
+    for length in lengths {
+        if length < 0 || length > MAX_BITS do return false
+        if length > 0 do h.counts[length] += 1
+    }
+
+    left := 1
+    for len in 1 .. 16 {
+        left <<= 1
+        left -= h.counts[len]
+        if left < 0 do return false
+    }
+
+    offs: [16] i32
+    offs[1] = 0
+    for len in 1 .. MAX_BITS {
+        offs[len + 1] = offs[len] + h.counts[len]
+    }
+
+    for i in 0 .. lengths.count {
+        length := lengths[i]
+        if length != 0 {
+            slot := offs[length]
+            if slot < 0 || slot >= MAX_SYMS do return false
+            h.symbols[slot] = ~~i
+            offs[length] = slot + 1
+        }
+    }
+
+    return true
+}
+
+#local
+decode_symbol :: (b: &Bit_In, h: &Huffman) -> i32 {
+    code := 0
+    first := 0
+    index := 0
+
+    for len in 1 .. 16 {
+        bit := bits(b, 1)
+        if bit < 0 do return -1
+        code |= bit
+        count := h.counts[len]
+        if code - count < first {
+            return h.symbols[index + (code - first)]
+        }
+        index += count
+        first += count
+        first <<= 1
+        code <<= 1
+    }
+
+    b.failed = true
+    return -1
+}
+
+#local
+LEN_BASE :: i32.[
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+]
+
+#local
+LEN_EXTRA :: i32.[
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+]
+
+#local
+DIST_BASE :: i32.[
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+]
+
+#local
+DIST_EXTRA :: i32.[
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
+]
+
+#local
+CL_ORDER :: i32.[
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+]
+
+#local
+inflate_codes :: (b: &Bit_In, out: &[..] u8, lit: &Huffman, dist: &Huffman) -> bool {
+    while true {
+        symbol := decode_symbol(b, lit)
+        if symbol < 0 do return false
+        if symbol < 256 {
+            *out << ~~symbol
+            continue
+        }
+        if symbol == 256 do return true
+        if symbol > 285 do return false
+
+        len_index := symbol - 257
+        length := LEN_BASE[len_index]
+        extra := LEN_EXTRA[len_index]
+        if extra > 0 {
+            more := bits(b, extra)
+            if more < 0 do return false
+            length += more
+        }
+
+        dist_symbol := decode_symbol(b, dist)
+        if dist_symbol < 0 || dist_symbol > 29 do return false
+        distance := DIST_BASE[dist_symbol]
+        dist_extra := DIST_EXTRA[dist_symbol]
+        if dist_extra > 0 {
+            more := bits(b, dist_extra)
+            if more < 0 do return false
+            distance += more
+        }
+        if distance <= 0 || cast(u32) distance > out.count do return false
+
+        for _ in 0 .. length {
+            index := cast(i32) out.count - distance
+            *out << (*out)[index]
+        }
+    }
+
+    return false
+}
+
+#local
+fixed_tables :: (lit: &Huffman, dist: &Huffman) -> bool {
+    lengths: [288] i32
+    for i in 0 .. 144 do lengths[i] = 8
+    for i in 144 .. 256 do lengths[i] = 9
+    for i in 256 .. 280 do lengths[i] = 7
+    for i in 280 .. 288 do lengths[i] = 8
+    if !build_huffman(lit, lengths[0 .. 288]) do return false
+
+    dlens: [32] i32
+    for i in 0 .. 32 do dlens[i] = 5
+    return build_huffman(dist, dlens[0 .. 32])
+}
+
+#local
+dynamic_tables :: (b: &Bit_In, lit: &Huffman, dist: &Huffman) -> bool {
+    hlit := bits(b, 5)
+    hdist := bits(b, 5)
+    hclen := bits(b, 4)
+    if hlit < 0 || hdist < 0 || hclen < 0 do return false
+    nlit := hlit + 257
+    ndist := hdist + 1
+    nlen := hclen + 4
+    if nlit > 286 || ndist > 30 || nlen > 19 do return false
+
+    cl_lengths: [19] i32
+    for i in 0 .. 19 do cl_lengths[i] = 0
+    for i in 0 .. nlen {
+        length := bits(b, 3)
+        if length < 0 do return false
+        cl_lengths[CL_ORDER[i]] = length
+    }
+
+    cl: Huffman
+    if !build_huffman(&cl, cl_lengths[0 .. 19]) do return false
+
+    total := nlit + ndist
+    lengths: [320] i32
+    for i in 0 .. 320 do lengths[i] = 0
+
+    filled := 0
+    while filled < total {
+        symbol := decode_symbol(b, &cl)
+        if symbol < 0 do return false
+        if symbol < 16 {
+            lengths[filled] = symbol
+            filled += 1
+        } elseif symbol == 16 {
+            if filled == 0 do return false
+            repeat := bits(b, 2)
+            if repeat < 0 do return false
+            repeat += 3
+            prev := lengths[filled - 1]
+            if filled + repeat > total do return false
+            for _ in 0 .. repeat {
+                lengths[filled] = prev
+                filled += 1
+            }
+        } elseif symbol == 17 {
+            repeat := bits(b, 3)
+            if repeat < 0 do return false
+            repeat += 3
+            if filled + repeat > total do return false
+            for _ in 0 .. repeat do filled += 1
+        } elseif symbol == 18 {
+            repeat := bits(b, 7)
+            if repeat < 0 do return false
+            repeat += 11
+            if filled + repeat > total do return false
+            for _ in 0 .. repeat do filled += 1
+        } else {
+            return false
+        }
+    }
+
+    if !build_huffman(lit, lengths[0 .. nlit]) do return false
+    return build_huffman(dist, lengths[nlit .. total])
+}
+
+#local
+inflate :: (input: [] u8, out: &[..] u8) -> bool {
+    b := Bit_In.{ data = input }
+    lit: Huffman
+    dist: Huffman
+
+    while true {
+        header := bits(&b, 3)
+        if header < 0 do return false
+        final := header & 1
+        kind := header >> 1
+
+        if kind == 0 {
+            b.bitbuf = 0
+            b.bitcnt = 0
+            if b.pos + 4 > b.data.count do return false
+            len := cast(i32) b.data[b.pos] | (cast(i32) b.data[b.pos + 1] << 8)
+            nlen := cast(i32) b.data[b.pos + 2] | (cast(i32) b.data[b.pos + 3] << 8)
+            b.pos += 4
+            if (len ^ 0xffff) != nlen do return false
+            if b.pos + ~~len > b.data.count do return false
+            for i in 0 .. len {
+                *out << b.data[b.pos + ~~i]
+            }
+            b.pos += ~~len
+        } elseif kind == 1 {
+            if !fixed_tables(&lit, &dist) do return false
+            if !inflate_codes(&b, out, &lit, &dist) do return false
+        } elseif kind == 2 {
+            if !dynamic_tables(&b, &lit, &dist) do return false
+            if !inflate_codes(&b, out, &lit, &dist) do return false
+        } else {
+            return false
+        }
+
+        if final != 0 do return !b.failed
+    }
+
+    return false
+}
+
+#local
+gzip_payload :: (src: [] u8) -> ? [] u8 {
+    if src.count < 10 do return .{}
+    if src[0] != 0x1f || src[1] != 0x8b || src[2] != 8 do return .{}
+
+    flags := src[3]
+    pos: u32 = 10
+    if (flags & 0xe0) != 0 do return .{}
+
+    if (flags & 4) != 0 {
+        if pos + 2 > src.count do return .{}
+        xlen := cast(u32) src[pos] | (cast(u32) src[pos + 1] << 8)
+        pos += 2 + xlen
+    }
+    if (flags & 8) != 0 {
+        while pos < src.count && src[pos] != 0 do pos += 1
+        pos += 1
+    }
+    if (flags & 16) != 0 {
+        while pos < src.count && src[pos] != 0 do pos += 1
+        pos += 1
+    }
+    if (flags & 2) != 0 do pos += 2
+    if pos > src.count do return .{}
+
+    return src[pos .. src.count]
+}
+
+/// Inflate a gzip member. The returned bytes are owned by the caller.
+gunzip :: (src: [] u8) -> ? [] u8 {
+    body := gzip_payload(src)
+    if !body do return .{}
+
+    out: [..] u8
+    if !inflate(body->unwrap(), &out) {
+        delete(&out)
+        return .{}
+    }
+    return out
+}
+
+content_is_gzip :: (value: str) -> bool {
+    rest := value
+    while rest {
+        part := rest
+        if idx := str.index_of(rest, #char ","); idx >= 0 {
+            part = rest[0 .. idx]
+            rest = rest[idx + 1 .. rest.count]
+        } else {
+            rest = ""
+        }
+        part = str.strip_whitespace(part)
+        if str.equal_insensitive(part, "gzip") || str.equal_insensitive(part, "x-gzip") {
+            return true
+        }
+    }
+    return false
+}

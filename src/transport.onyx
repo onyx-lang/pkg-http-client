@@ -1,6 +1,7 @@
 package http.client
 
-use core {package, net, io, sync, alloc, iter, time, hash, Result, memory}
+use core {package, net, io, sync, alloc, iter, time, hash, Result, memory, conv}
+use core.encoding.base64
 use tls
 
 // Mozilla CA extract.
@@ -19,17 +20,21 @@ Conn_Key :: struct {
     host: str
     port: u32
     https: bool
+    proxy_host: str
+    proxy_port: u32
 
     hash :: (k: Conn_Key) -> u32 {
         h := core.hash.hash(k.host)
         h = (h * 16777619) + k.port
         if k.https do h += 1
+        h = (h * 16777619) + core.hash.hash(k.proxy_host)
+        h = (h * 16777619) + k.proxy_port
         return h
     }
 }
 
 #operator == (a, b: Conn_Key) -> bool {
-    return a.port == b.port && a.https == b.https && a.host == b.host
+    return a.port == b.port && a.https == b.https && a.proxy_port == b.proxy_port && a.host == b.host && a.proxy_host == b.proxy_host
 }
 
 Default_Transport :: struct {
@@ -60,7 +65,8 @@ default_transport_initialize :: (dt: &Default_Transport) {
 default_transport_free :: (self: &Default_Transport) {
     for &self.open_sockets.entries {
         shutdown_connection(&it.value)
-        if it.key.host do delete(&it.key.host)
+        if it.value.owned_host do delete(&it.value.owned_host)
+        free_connection_strings(&it.value)
     }
 
     delete(&self.open_sockets)
@@ -81,82 +87,298 @@ default_transport_close_connection :: (dt: &Default_Transport, key: Conn_Key) {
     conn := &dt.open_sockets[key]
     if !conn do return
 
-    closed := Default_Transport_Connection.{ conn.https, conn.socket, conn.tls, conn.owned_host }
+    closed := *conn
     dt.open_sockets->remove(key)
 
     shutdown_connection(&closed)
     if closed.owned_host do delete(&closed.owned_host)
+    free_connection_strings(&closed)
 }
 
 #local
-default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(Default_Transport_Connection, Error) {
+attempt_deadline :: (req: &Request) -> time.Instant {
+    return time.Instant.now() + req.timeout
+}
+
+#local
+connect_deadline_for :: (req: &Request, total: time.Instant) -> time.Instant {
+    limit := req.connect_timeout
+    if cast(i64) limit == 0 do return total
+    connect_end := time.Instant.now() + limit
+    if connect_end > total do return total
+    return connect_end
+}
+
+#local
+default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool, deadline: time.Instant) -> Result(Default_Transport_Connection, Error) {
+    if request_cancelled(req) do return .{ Err = .Cancelled }
     logf(.Debug, "Creating connection to {}", req.url.host)
 
-    tc: Default_Transport_Connection
-    if use_https {
-        opened := tls.Client.connect(req.url.host, cast(u16) req.url.port, ca_bundle)
-        if opened.Err do return .{ Err = .TlsError }
+    connect_deadline := connect_deadline_for(req, deadline)
+    proxy := resolve_proxy(req.url, req.proxy, req.use_env_proxy)
+    defer proxy->free()
 
+    dial_host := req.url.host
+    dial_port := req.url.port
+    if proxy.enabled {
+        dial_host = proxy.url.host
+        dial_port = proxy.url.port
+    }
+
+    dialed := dial_timeout(dial_host, dial_port, connect_deadline)
+    if dialed.Err do return .{ Err = dialed.Err->unwrap() }
+    sock := dialed.Ok->unwrap()
+
+    tc: Default_Transport_Connection
+    tc.last_used = time.Instant.now()
+    if proxy.enabled {
+        tc.owned_proxy = copy_str(proxy.url.host)
+        tc.proxy_port = proxy.url.port
+        if proxy.url.user && !use_https {
+            raw := core.tprintf("{}:{}", proxy.url.user, proxy.url.pass)
+            encoded := base64.encode(raw)
+            defer delete(&encoded)
+            tc.proxy_authorization = copy_str(core.tprintf("Basic {}", encoded))
+        }
+    }
+
+    if proxy.enabled && use_https {
+        tunneled := write_connect(&sock, req, &proxy, connect_deadline)
+        if !tunneled {
+            net.socket_close(&sock)
+            free_connection_strings(&tc)
+            if connect_deadline <= time.Instant.now() do return .{ Err = .Timeout }
+            return .{ Err = .ConnectionFailed }
+        }
+    }
+
+    if use_https {
+        sni := req.url.host
+        if req.server_name do sni = req.server_name
+        ca := ca_bundle
+        if req.ca_pem do ca = req.ca_pem
+        cfg := tls.Tls_Config.{
+            ca_pem = ca,
+            insecure = req.insecure,
+            server_name = req.server_name,
+            client_cert_pem = req.client_cert_pem,
+            client_key_pem = req.client_key_pem,
+        }
+        started := tls.Client.start(sock, sni, cfg, connect_deadline, req.read_timeout)
+        if started.Err as err {
+            free_connection_strings(&tc)
+            if err == .Timeout do return .{ Err = .Timeout }
+            return .{ Err = .TlsError }
+        }
         tc.https = true
-        tc.tls = opened.Ok->unwrap()
+        tc.tls = started.Ok->unwrap()
         return .{ Ok = tc }
     }
 
-    created := net.socket_create(.Inet, .Stream, .IP)
-    if created.Err {
-        return .{ Err = .ConnectionFailed }
-    }
-    tc.socket = created.Ok->unwrap()
-
-    addr := net.SocketAddress.{ HostPort = .{ host = req.url.host, port = ~~req.url.port } }
-    if err := tc.socket->connect(&addr); err != .None {
-        net.socket_close(&tc.socket)
-        return .{ Err = .ConnectionFailed }
-    }
-
+    tc.socket = sock
+    tc.absolute_form = proxy.enabled
     return .{ Ok = tc }
 }
 
 #local
-default_send :: (conn: &Default_Transport_Connection, req: &Request) -> bool {
-    w := io.Writer.make(conn->stream())
-    write_successful := req->write(&w)
-    io.Writer.free(&w)
+free_connection_strings :: (conn: &Default_Transport_Connection) {
+    if conn.owned_proxy do delete(&conn.owned_proxy)
+    if conn.proxy_authorization do delete(&conn.proxy_authorization)
+    conn.owned_proxy = ""
+    conn.proxy_authorization = ""
+}
 
-    return write_successful
+#local
+write_connect :: (sock: &net.Socket, req: &Request, proxy: &Resolved_Proxy, deadline: time.Instant) -> bool {
+    host := req.url.host
+    port := req.url.port
+    lines: str
+    if str.contains(host, #char ":") {
+        lines = core.tprintf("CONNECT [{}]:{} HTTP/1.1\r\nHost: [{}]:{}\r\n", host, port, host, port)
+    } else {
+        lines = core.tprintf("CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n", host, port, host, port)
+    }
+    if proxy.url.user {
+        raw := core.tprintf("{}:{}", proxy.url.user, proxy.url.pass)
+        encoded := base64.encode(raw)
+        defer delete(&encoded)
+        auth := core.tprintf("Proxy-Authorization: Basic {}\r\n", encoded)
+        lines = core.tprintf("{}{}", lines, auth)
+    }
+    lines = core.tprintf("{}\r\n", lines)
+
+    sock->option(.NonBlocking, true)
+    if !write_all_timed(sock, lines, deadline) do return false
+    return read_connect_status(sock, deadline)
+}
+
+#local
+write_all_timed :: (sock: &net.Socket, data: [] u8, deadline: time.Instant) -> bool {
+    off: u32 = 0
+    while off < data.count {
+        ms := remaining_ms(deadline)
+        if ms == 0 do return false
+        ev := poll_fd(cast(i32) sock.handle, .Write, ms)
+        if ev != .Write do return false
+
+        result := io.Stream.write(sock, data[off .. data.count])
+        if result.Ok as n {
+            if n == 0 do return false
+            off += n
+            continue
+        }
+        err := result.Err->unwrap()
+        if err == .NoData || err == .ReadLater || err == .BufferFull do continue
+        return false
+    }
+    return true
+}
+
+#local
+read_connect_status :: (sock: &net.Socket, deadline: time.Instant) -> bool {
+    buf: [512] u8
+    count: u32 = 0
+    while count + 1 < buf.count {
+        ms := remaining_ms(deadline)
+        if ms == 0 do return false
+        ev := poll_fd(cast(i32) sock.handle, .Read, ms)
+        if ev != .Read do return false
+
+        one: [1] u8
+        result := io.Stream.read(sock, one)
+        if result.Err do return false
+        if result.Ok->unwrap() == 0 do return false
+        buf[count] = one[0]
+        count += 1
+        if count >= 4 && buf[count - 4 .. count] == "\r\n\r\n" do break
+    }
+    if count < 12 do return false
+
+    line := buf[0 .. count]
+    if idx := str.index_of(line, #char "\n"); idx > 0 {
+        line = line[0 .. idx]
+    }
+    _, rest := str.bisect(line, #char " ")
+    status_text, _ := str.bisect(str.strip_whitespace(rest), #char " ")
+    status := conv.parse_int(status_text)
+    return status >= 200 && status < 300
+}
+
+#local
+default_send :: (conn: &Default_Transport_Connection, req: &Request, deadline: time.Instant) -> Result(void, Error) {
+    if request_cancelled(req) do return .{ Err = .Cancelled }
+
+    req.use_absolute_form = conn.absolute_form
+    if conn.absolute_form do req.proxy_authorization = conn.proxy_authorization
+    defer {
+        req.use_absolute_form = false
+        req.proxy_authorization = ""
+    }
+
+    if conn.https {
+        conn.tls.deadline = deadline
+        conn.tls.idle = req.read_timeout
+        conn.tls.timed_out = false
+        conn.tls.sock->option(.NonBlocking, true)
+        w := io.Writer.make(&conn.tls)
+        ok := req->write(&w)
+        io.Writer.free(&w)
+        conn.tls.sock->option(.NonBlocking, false)
+        conn.tls.deadline = 0
+        conn.tls.idle = 0
+        if conn.tls.timed_out do return .{ Err = .Timeout }
+        if !ok do return .{ Err = .WriteFailed }
+        return .{ Ok = .{} }
+    }
+
+    conn.socket->option(.NonBlocking, true)
+    timed := new(Timed_Stream)
+    timed.base = .{ &timed_stream_vtable }
+    timed.inner = &conn.socket
+    timed.fd = cast(i32) conn.socket.handle
+    timed.deadline = deadline
+    timed.idle = req.read_timeout
+    timed.cancel = req.cancel
+
+    w := io.Writer.make(&timed.base)
+    ok := req->write(&w)
+    io.Writer.free(&w)
+    conn.socket->option(.NonBlocking, false)
+
+    timed_out := timed.timed_out
+    cancelled := timed.cancelled
+    cfree(timed)
+
+    if cancelled do return .{ Err = .Cancelled }
+    if timed_out do return .{ Err = .Timeout }
+    if !ok do return .{ Err = .WriteFailed }
+    return .{ Ok = .{} }
+}
+
+#local
+connection_is_stale :: (conn: &Default_Transport_Connection, idle: time.Duration) -> bool {
+    if cast(i64) idle <= 0 do return false
+    if cast(i64) conn.last_used == 0 do return false
+    return time.Instant.now() - conn.last_used > idle
 }
 
 #local
 default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Response, Error) {
     if req.url.protocol == .Unknown do return .{ Err = .InvalidUrl }
+    if request_cancelled(req) do return .{ Err = .Cancelled }
     t.initializeOnce->exec(t, default_transport_initialize)
 
+    deadline := attempt_deadline(req)
     use_https := req.url.protocol == .HTTPS11
-    location := Conn_Key.{ req.url.host, req.url.port, use_https }
+    proxy := resolve_proxy(req.url, req.proxy, req.use_env_proxy)
+    defer proxy->free()
+
+    proxy_host := ""
+    proxy_port: u32 = 0
+    if proxy.enabled {
+        proxy_host = proxy.url.host
+        proxy_port = proxy.url.port
+    }
+    location := Conn_Key.{ req.url.host, req.url.port, use_https, proxy_host, proxy_port }
     reused := false
 
     if t.open_sockets->has(location) {
         conn := &t.open_sockets[location]
-        if default_send(conn, req) {
-            reused = true
-        } else {
+        if connection_is_stale(conn, req.idle_timeout) {
             default_transport_close_connection(t, location)
-            if req.body_stream do return .{ Err = .WriteFailed }
+        } else {
+            sent := default_send(conn, req, deadline)
+            if sent.Ok {
+                reused = true
+            } else {
+                err := sent.Err->unwrap()
+                default_transport_close_connection(t, location)
+                streamed := false
+                if req.body_stream do streamed = true
+                if !should_retry_reused(req.method, req.custom_method, streamed, err) {
+                    return .{ Err = err }
+                }
+            }
         }
     }
 
     if !reused {
-        return send_on_new_connection(t, req, use_https)
+        return send_on_new_connection(t, req, use_https, deadline)
     }
 
-    result := read_response(t, location, req)
-    if result.Err && !req.body_stream {
+    conn := &t.open_sockets[location]
+    if conn do conn.last_used = time.Instant.now()
+
+    result := read_response(t, location, req, deadline)
+    if result.Err {
         err := result.Err->unwrap()
-        if err == .Timeout || err == .ResponseParseFailed || err == .WriteFailed {
+        streamed := false
+        if req.body_stream do streamed = true
+        if should_retry_reused(req.method, req.custom_method, streamed, err) {
             if t.open_sockets->has(location) {
                 default_transport_close_connection(t, location)
             }
-            return send_on_new_connection(t, req, use_https)
+            return send_on_new_connection(t, req, use_https, deadline)
         }
     }
 
@@ -164,23 +386,33 @@ default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Respon
 }
 
 #local
-send_on_new_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(&Response, Error) {
-    new_conn := default_transport_create_connection(t, req, use_https)?
+send_on_new_connection :: (t: &Default_Transport, req: &Request, use_https: bool, deadline: time.Instant) -> Result(&Response, Error) {
+    new_conn := default_transport_create_connection(t, req, use_https, deadline)?
     owned_host := copy_str(req.url.host)
     new_conn.owned_host = owned_host
-    stored := Conn_Key.{ owned_host, req.url.port, use_https }
+    stored := Conn_Key.{
+        owned_host,
+        req.url.port,
+        use_https,
+        new_conn.owned_proxy,
+        new_conn.proxy_port,
+    }
     t.open_sockets[stored] = new_conn
 
-    if !default_send(&t.open_sockets[stored], req) {
+    sent := default_send(&t.open_sockets[stored], req, deadline)
+    if sent.Err as err {
         default_transport_close_connection(t, stored)
-        return .{ Err = .WriteFailed }
+        return .{ Err = err }
     }
 
-    return read_response(t, stored, req)
+    if conn := &t.open_sockets[stored]; conn {
+        conn.last_used = time.Instant.now()
+    }
+    return read_response(t, stored, req, deadline)
 }
 
 #local
-read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> Result(&Response, Error) {
+read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request, deadline: time.Instant) -> Result(&Response, Error) {
     conn := &t.open_sockets[location]
     if !conn do return .{ Err = .ConnectionFailed }
 
@@ -190,11 +422,17 @@ read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> R
         conn.tls.flags = ~~(cast(u32) conn.tls.flags & cast(u32) ~io.Stream_Flags.Block_On_Read)
     }
 
-    deadline := time.Instant.now() + req.timeout
-    ds := Read_Stream.make(conn->stream(), deadline)
+    ds := Read_Stream.make(conn->stream(), deadline, req.read_timeout, req.cancel)
     r := io.Reader.make(&ds.base)
 
     resp := parse_response(&r, req.method, read_body=!req.stream_response)
+    if ds.cancelled {
+        if resp.Ok do resp.Ok->unwrap()->free()
+        io.Reader.free(&r)
+        cfree(ds)
+        default_transport_close_connection(t, location)
+        return .{ Err = .Cancelled }
+    }
     if ds.timed_out {
         if resp.Ok do resp.Ok->unwrap()->free()
         io.Reader.free(&r)
@@ -228,7 +466,7 @@ read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> R
     live.conn = t.open_sockets[location]!
     t.open_sockets->remove(location)
     live.decoder = Body_Decoder.from_response(parsed, req.method)
-    live.read_stream = Read_Stream.make(live.conn->stream(), deadline)
+    live.read_stream = Read_Stream.make(live.conn->stream(), deadline, req.read_timeout, req.cancel)
 
     leftover := r.end - r.start
     buf_size: u32 = 4096
@@ -269,9 +507,10 @@ release_streamed_body :: (live: &Streamed_Body) {
         live.read_stream = null
     }
 
-    key := Conn_Key.{ live.conn.owned_host, live.port, live.https }
+    key := Conn_Key.{ live.conn.owned_host, live.port, live.https, live.conn.owned_proxy, live.conn.proxy_port }
     if !live.failed && live.decoder->done() && !live.must_close {
         if live.transport && !live.transport.open_sockets->has(key) {
+            live.conn.last_used = time.Instant.now()
             live.transport.open_sockets[key] = live.conn
             return
         }
@@ -279,6 +518,7 @@ release_streamed_body :: (live: &Streamed_Body) {
 
     shutdown_connection(&live.conn)
     if live.conn.owned_host do delete(&live.conn.owned_host)
+    free_connection_strings(&live.conn)
 }
 
 Default_Transport_Connection :: struct {
@@ -286,6 +526,11 @@ Default_Transport_Connection :: struct {
     socket: net.Socket
     tls: tls.Client
     owned_host: str
+    owned_proxy: str
+    last_used: time.Instant
+    absolute_form: bool
+    proxy_port: u32
+    proxy_authorization: str
 
     stream :: (conn: &#Self) -> &io.Stream {
         if conn.https do return &conn.tls
@@ -297,15 +542,79 @@ Read_Stream :: struct {
     use base: io.Stream
     inner: &io.Stream
     deadline: time.Instant
+    idle: time.Duration
+    cancel: &CancelFlag
     timed_out: bool
+    cancelled: bool
 }
 
-Read_Stream.make :: (inner: &io.Stream, deadline: time.Instant) -> &Read_Stream {
+Read_Stream.make :: (inner: &io.Stream, deadline: time.Instant, idle: time.Duration, cancel: &CancelFlag) -> &Read_Stream {
     s := new(Read_Stream)
     s.base = .{ &read_stream_vtable }
     s.inner = inner
     s.deadline = deadline
+    s.idle = idle
+    s.cancel = cancel
     return s
+}
+
+Timed_Stream :: struct {
+    use base: io.Stream
+    inner: &io.Stream
+    fd: i32
+    deadline: time.Instant
+    idle: time.Duration
+    cancel: &CancelFlag
+    timed_out: bool
+    cancelled: bool
+}
+
+timed_stream_vtable := io.Stream_Vtable.{
+    write = (s: &Timed_Stream, buffer: [] u8) -> Result(u32, io.Error) {
+        off: u32 = 0
+        while off < buffer.count {
+            if !timed_stream_wait(s) {
+                if s.cancelled do return .{ Err = .EOF }
+                s.timed_out = true
+                return .{ Err = .EOF }
+            }
+            result := io.Stream.write(s.inner, buffer[off .. buffer.count])
+            if result.Ok as n {
+                if n == 0 do return .{ Err = .EOF }
+                off += n
+                continue
+            }
+            err := result.Err->unwrap()
+            if err == .NoData || err == .ReadLater || err == .BufferFull do continue
+            return result
+        }
+        return .{ Ok = buffer.count }
+    },
+}
+
+#local
+timed_stream_wait :: (s: &Timed_Stream) -> bool {
+    if s.cancel && s.cancel.cancelled {
+        s.cancelled = true
+        return false
+    }
+    ms := remaining_ms(s.deadline)
+    if cast(i64) s.idle > 0 {
+        idle_ms := s.idle->as_ms()
+        if idle_ms > 0 && (ms == 0 || idle_ms < cast(i64) ms) do ms = ~~idle_ms
+    }
+    if ms <= 0 {
+        s.timed_out = true
+        return false
+    }
+    ev := poll_fd(s.fd, .Write, ms)
+    if ev == .Write do return true
+    if s.cancel && s.cancel.cancelled {
+        s.cancelled = true
+        return false
+    }
+    s.timed_out = true
+    return false
 }
 
 read_stream_vtable := io.Stream_Vtable.{
@@ -334,17 +643,31 @@ read_stream_vtable := io.Stream_Vtable.{
 
 #local
 read_stream_wait :: (s: &Read_Stream) -> bool {
-    remaining := s.deadline - time.Instant.now()
-    if remaining <= 0 {
+    if s.cancel && s.cancel.cancelled {
+        s.cancelled = true
+        return false
+    }
+
+    now := time.Instant.now()
+    total := s.deadline - now
+    if total <= 0 {
         s.timed_out = true
         return false
     }
 
-    ms := remaining->as_ms()
+    wait := total
+    if cast(i64) s.idle > 0 && s.idle < total do wait = s.idle
+    ms := wait->as_ms()
+    if ms <= 0 do ms = 1
     if ms > 2000000000 do ms = 2000000000
 
     polled := io.Stream.poll(s.inner, .Read, ~~ms)
+    if s.cancel && s.cancel.cancelled {
+        s.cancelled = true
+        return false
+    }
     if polled.Ok && polled.Ok->unwrap() do return true
+    if polled.Err do return false
 
     s.timed_out = true
     return false
