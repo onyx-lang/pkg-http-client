@@ -13,6 +13,9 @@ Response :: struct {
     live: &Streamed_Body
     url: str
     gzip_done: bool
+
+    // Owned by the response. body_stream() fills this in.
+    payload: &Body_Stream
 }
 
 Response.make :: () => new(#Self)
@@ -29,7 +32,20 @@ Response.free :: (r: &Response) {
     r.headers->free()
     delete(&r.body)
     if r.url do delete(&r.url)
+    if r.payload do cfree(r.payload)
     cfree(r)
+}
+
+// Decoded payload bytes. Chunk framing and content-length limits are applied
+// here. The response owns the stream; wrap it with io.Reader to buffer.
+Response.body_stream :: (r: &Response) -> &io.Stream {
+    if !r.payload {
+        s := new(Body_Stream)
+        s.base = .{ &body_stream_vtable }
+        s.response = r
+        r.payload = s
+    }
+    return &r.payload.base
 }
 
 Response.read :: (r: &Response, dest: [] u8) -> Result(u32, Error) {
@@ -590,6 +606,56 @@ response_has_body :: (resp: &Response, method: Method) -> bool {
     if !ok do return false
     if kind == .Chunked || kind == .UntilEof do return true
     return kind == .Length && length > 0
+}
+
+Body_Stream :: struct {
+    use base: io.Stream
+    response: &Response
+    failed: bool
+}
+
+body_stream_vtable := io.Stream_Vtable.{
+    read = (s: &Body_Stream, buffer: [] u8) -> Result(u32, io.Error) {
+        return body_stream_read(s, buffer)
+    },
+
+    read_byte = (s: &Body_Stream) -> Result(u8, io.Error) {
+        byte: [1] u8
+        result := body_stream_read(s, byte)
+        if result.Err as err do return .{ Err = err }
+        if result.Ok->unwrap() == 0 do return .{ Err = .EOF }
+        return .{ Ok = byte[0] }
+    },
+
+    close = (s: &Body_Stream) -> io.Error {
+        if s.response.live do release_streamed_body(s.response.live)
+        return .None
+    },
+}
+
+#local
+body_stream_read :: (s: &Body_Stream, buffer: [] u8) -> Result(u32, io.Error) {
+    if s.failed do return .{ Err = .BadFile }
+    if buffer.count == 0 do return .{ Ok = 0 }
+
+    r := s.response
+    if r.live && !r.live.finished {
+        result := read_live(r, buffer)
+        if result.Err {
+            s.failed = true
+            return .{ Err = .BadFile }
+        }
+        n := result.Ok->unwrap()
+        if n == 0 do return .{ Err = .EOF }
+        return .{ Ok = n }
+    }
+
+    if r.body_pos >= r.body.count do return .{ Err = .EOF }
+    n := r.body.count - r.body_pos
+    if n > buffer.count do n = buffer.count
+    memory.copy(buffer.data, r.body.data + r.body_pos, n)
+    r.body_pos += n
+    return .{ Ok = n }
 }
 
 #local

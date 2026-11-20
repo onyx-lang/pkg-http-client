@@ -79,7 +79,7 @@ shutdown_connection :: (conn: &Default_Transport_Connection) {
         return
     }
 
-    net.socket_close(&conn.socket)
+    if conn.socket.alive do net.socket_close(&conn.socket)
 }
 
 #local

@@ -503,6 +503,37 @@ stream_response_read :: (t: &core.test.T) {
     failed := false
     if early.Err do failed = true
     t->assert(failed, "early eof")
+
+    buffered := Response.make()
+    defer buffered->free()
+    buffered.body = "hello"
+    plain := buffered->body_stream()
+    got := io.Stream.read(plain, out)!
+    t->assert(got == 5 && out[0 .. 5] == "hello", "buffered stream")
+    end := io.Stream.read(plain, out)
+    t->assert(end.Err && end.Err->unwrap() == io.Error.EOF, "buffered eof")
+
+    wire := io.BufferStream.make("5\r\nhello\r\n0\r\n\r\n", write_enabled=false)
+    deadline := time.Instant.now() + 5 * time.SECOND
+    rs := Read_Stream.make(&wire.stream, deadline, 0, null)
+    live_headers := Headers.make()
+    live_headers->set("transfer-encoding", "chunked")
+    live_resp := Response.make()
+    defer live_resp->free()
+    live_resp.headers = live_headers
+    live_resp.status = 200
+    live := new(Streamed_Body)
+    live.decoder = Body_Decoder.from_response(live_resp, .Get)
+    live.read_stream = rs
+    live.reader = io.Reader.make(&rs.base)
+    live_resp.live = live
+
+    decoded := live_resp->body_stream()
+    decoded_reader := io.Reader.make(decoded)
+    defer io.Reader.free(&decoded_reader)
+    payload := decoded_reader->read_all()
+    defer delete(&payload)
+    t->assert(payload == "hello", "chunked stream")
 }
 
 #local
