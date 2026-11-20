@@ -36,6 +36,11 @@ Response.free :: (r: &Response) {
     cfree(r)
 }
 
+#overload
+__dispose_used_local :: macro (resp: & &Response) {
+    resp.*->free()
+}
+
 // Decoded payload bytes. Chunk framing and content-length limits are applied
 // here. The response owns the stream; wrap it with io.Reader to buffer.
 Response.body_stream :: (r: &Response) -> &io.Stream {

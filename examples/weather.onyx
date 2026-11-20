@@ -10,8 +10,7 @@ main :: () {
     // Create a client for sending requests. This is not required,
     // but allows for customizations like custom headers, and
     // persistent cookies.
-    client := http.client.Client.{}
-    defer client->free()
+    use client := http.client.Client.make()
 
     //
     // Add some headers that will be attached to every request.
@@ -24,14 +23,12 @@ main :: () {
 
     //
     // Create a new GET request for the provided API.
-    req := client->new_request(.Get, "https://api.weatherapi.com/v1/forecast.json")
-    defer req->free()
+    use req := client->new_request(.Get, "https://api.weatherapi.com/v1/forecast.json")
 
     //
     // Create a Query object that represents query parameters.
     // Also, set some query paramters.
-    q := http.client.Query.{}
-    defer q->free()
+    use q := http.client.Query.{}
 
     q->set("key", "API KEY HERE")
     q->set("q",   "London, UK")
@@ -39,12 +36,10 @@ main :: () {
 
     //
     // Send the request.
-    result := client->send(req)
-    if result.Err {
-        printf("request failed: {}\n", result->err()!)
-        return
+    resp := client->send(req) ?? [e] {
+        printf("request failed: {}\n", e)
+        return #from_proc
     }
-    resp := result!
     defer resp->free()
     println(resp.status)
 

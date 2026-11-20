@@ -224,8 +224,7 @@ cookie_jar_filters :: (t: &core.test.T) {
 
 @core.test.test.{"request"}
 request_host_and_form :: (t: &core.test.T) {
-    req := new_request(.Get, "http://[::1]:8080/a")
-    defer req->free()
+    use req := Request.make(.Get, "http://[::1]:8080/a")
     req.headers = Headers.make()
     req.cookies = CookieJar.make()
 
@@ -249,8 +248,7 @@ request_host_and_form :: (t: &core.test.T) {
 
 @core.test.test.{"stream request"}
 stream_request_write :: (t: &core.test.T) {
-    req := new_request(.Post, "http://example.com/upload")
-    defer req->free()
+    use req := Request.make(.Post, "http://example.com/upload")
     req.headers = Headers.make()
     req.cookies = CookieJar.make()
 
@@ -302,8 +300,7 @@ api_gaps :: (t: &core.test.T) {
     t->assert(is_public_suffix("foo.amazonaws.com"), "wildcard")
     t->assert(!is_public_suffix("example.com"), "registrable")
 
-    req := new_request(.Get, "http://example.com/a?b=1")
-    defer req->free()
+    use req := Request.make(.Get, "http://example.com/a?b=1")
     req.headers = Headers.make()
     req.cookies = CookieJar.make()
     q := Query.{}
@@ -319,8 +316,7 @@ api_gaps :: (t: &core.test.T) {
     t->assert(str.starts_with(str.as_str(sb), "PROPFIND /a?"), "custom verb")
     t->assert(req.method->as_str() == "" || req->verb() == "PROPFIND", "verb")
 
-    patch := new_request(.Patch, "http://example.com/a")
-    defer patch->free()
+    use patch := Request.make(.Patch, "http://example.com/a")
     t->assert(patch.method->as_str() == "PATCH", "patch")
 
     resp := Response.make()

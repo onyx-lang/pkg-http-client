@@ -4,11 +4,11 @@ use http
 use core {sync, time, alloc, Result, tprintf, io}
 
 Client :: struct {
-    transport: &Transport = Default_Transport.make()
+    transport: &Transport
 
-    default_headers: Headers = Headers.make()
+    default_headers: Headers
 
-    cookies: CookieJar = CookieJar.make()
+    cookies: CookieJar
 
     default_timeout := 10 * time.SECOND
     connect_timeout := 10 * time.SECOND
@@ -31,10 +31,27 @@ Client :: struct {
     cancel: &CancelFlag
 }
 
+Client.make :: () -> (c: Client) {
+    Client.init(&c)
+    return
+}
+
+Client.init :: (c: &Client) {
+    c.* = .{}
+    c.transport = Default_Transport.make()
+    c.default_headers = Headers.make()
+    c.cookies = CookieJar.make()
+}
+
 Client.free :: (c: &Client) {
     c.default_headers->free()
     c.cookies->free()
     c.transport->free()
+}
+
+#overload
+__dispose_used_local :: macro (c: &Client) {
+    c->free()
 }
 
 Client.send :: (c: &Client, req: &Request) -> Result(&Response, Error) {
@@ -109,7 +126,7 @@ send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response,
 
 Client.new_request :: #match {
     (c: &Client) -> &Request {
-        req := http.client.new_request()
+        req := Request.make()
         req.headers = c.default_headers->clone()
         req.cookies = c.cookies->clone()
         req.timeout = c.default_timeout
@@ -120,7 +137,7 @@ Client.new_request :: #match {
     },
 
     (c: &Client, method: Method, url: str) -> &Request {
-        req := http.client.new_request(method, url)
+        req := Request.make(method, url)
         req.headers = c.default_headers->clone()
         req.cookies = c.cookies->clone()
         req.timeout = c.default_timeout

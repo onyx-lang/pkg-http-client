@@ -12,8 +12,7 @@ main :: () {
     // Create a client for sending requests. This is not required,
     // but allows for customizations like custom headers, and
     // persistent cookies.
-    client := http.client.Client.{}
-    defer client->free()
+    use client := http.client.Client.make()
 
     client.default_headers->add("user-agent", "onyx-http/0.1.1")
 

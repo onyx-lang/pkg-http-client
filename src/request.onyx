@@ -5,6 +5,8 @@ use core.encoding.json
 use core.encoding.base64
 
 Request :: struct {
+    allocator: Allocator
+
     method: Method
     headers: Headers
 
@@ -50,11 +52,12 @@ Request :: struct {
 //
 // Use Client->new_request() instead.
 //
-new_request :: #match #local {}
+Request.make :: #match #local {}
 
 #overload
-new_request :: (method: Method, url: str) -> &Request {
+Request.make :: (method: Method, url: str) -> &Request {
     req := new(Request.{
+        allocator = context.allocator,
         method = method,
     })
 
@@ -66,10 +69,9 @@ new_request :: (method: Method, url: str) -> &Request {
 }
 
 #overload
-new_request :: () -> &Request {
-    return new(Request.{})
+Request.make :: () -> &Request {
+    return new(Request.{context.allocator})
 }
-
 
 Request.free :: (r: &Request) {
     r.headers->free()
@@ -80,7 +82,12 @@ Request.free :: (r: &Request) {
     if r.owned_method do delete(&r.owned_method)
     if r.url_storage do delete(&r.url_storage)
 
-    cfree(r)
+    r.allocator->free(r)
+}
+
+#overload
+__dispose_used_local :: macro (r: & &Request) {
+    r.*->free()
 }
 
 Request.set_url :: (r: &Request, url: str) {

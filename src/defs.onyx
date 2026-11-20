@@ -461,6 +461,11 @@ Query.set :: (q: &Query, key, value: str) {
     }
 }
 
+#overload
+__dispose_used_local :: macro (q: &Query) {
+    q->free()
+}
+
 Query.free :: (q: &Query) {
     for& e in q.entries {
         delete(&e.key)
