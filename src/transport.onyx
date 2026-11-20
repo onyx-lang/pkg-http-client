@@ -1,47 +1,49 @@
 package http.client
 
 use core {package, net, io, sync, alloc, iter, time, hash, Result, memory}
-use openssl {*}
+use tls
+
+// Mozilla CA extract.
+ca_bundle :: #file_contents "cacert.pem"
 
 Transport :: struct {
-    use __vtable: &Transport_Vtable;
+    use __vtable: &Transport_Vtable
 }
 
 Transport_Vtable :: struct {
-    send_request: (&Transport, &Request) -> Result(&Response, Error);
-    free: (&Transport) -> void;
+    send_request: (&Transport, &Request) -> Result(&Response, Error)
+    free: (&Transport) -> void
 }
 
 Conn_Key :: struct {
-    host: str;
-    port: u32;
-    https: bool;
+    host: str
+    port: u32
+    https: bool
 
     hash :: (k: Conn_Key) -> u32 {
-        h := core.hash.hash(k.host);
-        h = (h * 16777619) + k.port;
-        if k.https do h += 1;
-        return h;
+        h := core.hash.hash(k.host)
+        h = (h * 16777619) + k.port
+        if k.https do h += 1
+        return h
     }
 }
 
 #operator == (a, b: Conn_Key) -> bool {
-    return a.port == b.port && a.https == b.https && a.host == b.host;
+    return a.port == b.port && a.https == b.https && a.host == b.host
 }
 
 Default_Transport :: struct {
-    use base: Transport;
+    use base: Transport
 
-    initializeOnce: sync.Once;
+    initializeOnce: sync.Once
 
-    ssl_ctx: SSL_CTX;
-    open_sockets: Map(Conn_Key, Default_Transport_Connection);
+    open_sockets: Map(Conn_Key, Default_Transport_Connection)
 }
 
 Default_Transport.make :: () -> &Default_Transport {
-    return alloc.on_heap(Default_Transport.{
+    return new(Default_Transport.{
         Transport.{ &default_transport_vtable }
-    });
+    })
 }
 
 default_transport_vtable := Transport_Vtable.{
@@ -51,376 +53,299 @@ default_transport_vtable := Transport_Vtable.{
 
 #local
 default_transport_initialize :: (dt: &Default_Transport) {
-    Map.init(&dt.open_sockets, alloc.heap_allocator);
-
-    dt.ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if cast(u64, dt.ssl_ctx) == 0 {
-        return;
-    }
-
-    SSL_CTX_set_verify(dt.ssl_ctx, SSL_VERIFY_PEER, null);
-    SSL_CTX_set_verify_depth(dt.ssl_ctx, 4);
-    SSL_CTX_set_options(dt.ssl_ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
-    SSL_CTX_set_default_verify_paths(dt.ssl_ctx);
+    Map.init(&dt.open_sockets, alloc.heap_allocator)
 }
 
 #local
 default_transport_free :: (self: &Default_Transport) {
     for &self.open_sockets.entries {
-        shutdown_connection(&it.value);
-        if it.key.host do delete(&it.key.host);
+        shutdown_connection(&it.value)
+        if it.key.host do delete(&it.key.host)
     }
 
-    delete(&self.open_sockets);
-
-    if cast(u64, self.ssl_ctx) != 0 {
-        SSL_CTX_free(self.ssl_ctx);
-    }
+    delete(&self.open_sockets)
 }
 
 #local
 shutdown_connection :: (conn: &Default_Transport_Connection) {
-    net.socket_close(&conn.socket);
-
-    if conn.ssl {
-        ssl := conn.ssl->unwrap();
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
+    if conn.https {
+        conn.tls->close()
+        return
     }
+
+    net.socket_close(&conn.socket)
 }
 
 #local
 default_transport_close_connection :: (dt: &Default_Transport, key: Conn_Key) {
-    conn := &dt.open_sockets[key];
-    if !conn do return;
+    conn := &dt.open_sockets[key]
+    if !conn do return
 
-    host := conn.owned_host;
-    socket := conn.socket;
-    ssl := conn.ssl;
+    closed := Default_Transport_Connection.{ conn.https, conn.socket, conn.tls, conn.owned_host }
+    dt.open_sockets->remove(key)
 
-    dt.open_sockets->delete(key);
-
-    closed := Default_Transport_Connection.{ socket, ssl, host };
-    shutdown_connection(&closed);
-    if host do delete(&host);
+    shutdown_connection(&closed)
+    if closed.owned_host do delete(&closed.owned_host)
 }
 
 #local
 default_transport_create_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(Default_Transport_Connection, Error) {
-    logf(.Debug, "Creating connection to {}", req.url.host);
+    logf(.Debug, "Creating connection to {}", req.url.host)
 
-    tc: Default_Transport_Connection;
-    created := net.socket_create(.Inet, .Stream, .IP);
-    if created.Err {
-        return .{ Err = .ConnectionFailed };
-    }
-    tc.socket = created.Ok->unwrap();
-
-    addr := net.SocketAddress.{ HostPort = .{ host = req.url.host, port = ~~req.url.port } };
-    if err := tc.socket->connect(&addr); err != .None {
-        net.socket_close(&tc.socket);
-        return .{ Err = .ConnectionFailed };
-    }
-
+    tc: Default_Transport_Connection
     if use_https {
-        if cast(u64, t.ssl_ctx) == 0 {
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
+        opened := tls.Client.connect(req.url.host, cast(u16) req.url.port, ca_bundle)
+        if opened.Err do return .{ Err = .TlsError }
 
-        ssl := SSL_new(t.ssl_ctx);
-        if cast(u64, ssl) == 0 {
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-
-        bio := BIO_new_socket(cast(u32, tc.socket.handle), BIO_NOCLOSE);
-        if cast(u64, bio) == 0 {
-            SSL_free(ssl);
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-        SSL_set_bio(ssl, bio, bio);
-
-        host_z := core.tprintf(u8.[ '{', '}', 0 ], req.url.host);
-        if SSL_set1_host(ssl, host_z.data) != 1 {
-            SSL_free(ssl);
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-
-        if SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, ~~ TLSEXT_NAMETYPE_host_name, host_z.data) == 0 {
-            SSL_free(ssl);
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-
-        handshake_result := SSL_connect(ssl);
-        if handshake_result <= 0 {
-            err := SSL_get_error(ssl, handshake_result);
-            log(.Error, "HTTPS", core.tprintf("SSL Error: code {}", err));
-            SSL_free(ssl);
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-
-        if SSL_get_verify_result(ssl) != ~~X509_V_OK {
-            SSL_free(ssl);
-            net.socket_close(&tc.socket);
-            return .{ Err = .TlsError };
-        }
-
-        tc.ssl->set(ssl);
+        tc.https = true
+        tc.tls = opened.Ok->unwrap()
+        return .{ Ok = tc }
     }
 
-    return .{ Ok = tc };
+    created := net.socket_create(.Inet, .Stream, .IP)
+    if created.Err {
+        return .{ Err = .ConnectionFailed }
+    }
+    tc.socket = created.Ok->unwrap()
+
+    addr := net.SocketAddress.{ HostPort = .{ host = req.url.host, port = ~~req.url.port } }
+    if err := tc.socket->connect(&addr); err != .None {
+        net.socket_close(&tc.socket)
+        return .{ Err = .ConnectionFailed }
+    }
+
+    return .{ Ok = tc }
 }
 
 #local
 default_send :: (conn: &Default_Transport_Connection, req: &Request) -> bool {
-    conn.socket->option(.NonBlocking, false);
-    stream := conn->as_stream();
+    w := io.Writer.make(conn->stream())
+    write_successful := req->write(&w)
+    io.Writer.free(&w)
 
-    w := io.writer_make(stream);
-    write_successful := req->write(&w);
-    io.writer_free(&w);
-
-    return write_successful;
+    return write_successful
 }
 
 #local
 default_send_request :: (t: &Default_Transport, req: &Request) -> Result(&Response, Error) {
-    if req.url.protocol == .Unknown do return .{ Err = .InvalidUrl };
-    t.initializeOnce->exec(t, default_transport_initialize);
+    if req.url.protocol == .Unknown do return .{ Err = .InvalidUrl }
+    t.initializeOnce->exec(t, default_transport_initialize)
 
-    use_https := req.url.protocol == .HTTPS11;
-    if use_https && cast(u64, t.ssl_ctx) == 0 {
-        return .{ Err = .TlsError };
-    }
-
-    location := Conn_Key.{ req.url.host, req.url.port, use_https };
-    reused := false;
+    use_https := req.url.protocol == .HTTPS11
+    location := Conn_Key.{ req.url.host, req.url.port, use_https }
+    reused := false
 
     if t.open_sockets->has(location) {
-        conn := &t.open_sockets[location];
+        conn := &t.open_sockets[location]
         if default_send(conn, req) {
-            reused = true;
+            reused = true
         } else {
-            default_transport_close_connection(t, location);
-            if req.body_stream do return .{ Err = .WriteFailed };
+            default_transport_close_connection(t, location)
+            if req.body_stream do return .{ Err = .WriteFailed }
         }
     }
 
     if !reused {
-        return send_on_new_connection(t, req, use_https);
+        return send_on_new_connection(t, req, use_https)
     }
 
-    result := read_response(t, location, req);
+    result := read_response(t, location, req)
     if result.Err && !req.body_stream {
-        err := result.Err->unwrap();
+        err := result.Err->unwrap()
         if err == .Timeout || err == .ResponseParseFailed || err == .WriteFailed {
             if t.open_sockets->has(location) {
-                default_transport_close_connection(t, location);
+                default_transport_close_connection(t, location)
             }
-            return send_on_new_connection(t, req, use_https);
+            return send_on_new_connection(t, req, use_https)
         }
     }
 
-    return result;
+    return result
 }
 
 #local
 send_on_new_connection :: (t: &Default_Transport, req: &Request, use_https: bool) -> Result(&Response, Error) {
-    new_conn := default_transport_create_connection(t, req, use_https)?;
-    owned_host := copy_str(req.url.host);
-    new_conn.owned_host = owned_host;
-    stored := Conn_Key.{ owned_host, req.url.port, use_https };
-    t.open_sockets[stored] = new_conn;
+    new_conn := default_transport_create_connection(t, req, use_https)?
+    owned_host := copy_str(req.url.host)
+    new_conn.owned_host = owned_host
+    stored := Conn_Key.{ owned_host, req.url.port, use_https }
+    t.open_sockets[stored] = new_conn
 
     if !default_send(&t.open_sockets[stored], req) {
-        default_transport_close_connection(t, stored);
-        return .{ Err = .WriteFailed };
+        default_transport_close_connection(t, stored)
+        return .{ Err = .WriteFailed }
     }
 
-    return read_response(t, stored, req);
+    return read_response(t, stored, req)
 }
 
 #local
 read_response :: (t: &Default_Transport, location: Conn_Key, req: &Request) -> Result(&Response, Error) {
-    conn := &t.open_sockets[location];
-    if !conn do return .{ Err = .ConnectionFailed };
+    conn := &t.open_sockets[location]
+    if !conn do return .{ Err = .ConnectionFailed }
 
-    conn.socket->option(.NonBlocking, true);
+    // HTTPS reads return ReadLater once Block_On_Read is cleared, so the
+    // deadline poll below is what waits. The socket itself stays blocking.
+    if conn.https {
+        conn.tls.flags = ~~(cast(u32) conn.tls.flags & cast(u32) ~io.Stream_Flags.Block_On_Read)
+    }
 
-    deadline := time.Instant.now() + req.timeout;
-    ds := Read_Stream.make(conn, deadline);
-    r := io.reader_make(&ds.base);
+    deadline := time.Instant.now() + req.timeout
+    ds := Read_Stream.make(conn->stream(), deadline)
+    r := io.Reader.make(&ds.base)
 
-    resp := parse_response(&r, req.method, read_body=!req.stream_response);
+    resp := parse_response(&r, req.method, read_body=!req.stream_response)
     if ds.timed_out {
-        if resp.Ok do resp.Ok->unwrap()->free();
-        io.reader_free(&r);
-        cfree(ds);
-        default_transport_close_connection(t, location);
-        return .{ Err = .Timeout };
+        if resp.Ok do resp.Ok->unwrap()->free()
+        io.Reader.free(&r)
+        cfree(ds)
+        default_transport_close_connection(t, location)
+        return .{ Err = .Timeout }
     }
 
     if resp.Err {
-        io.reader_free(&r);
-        cfree(ds);
-        default_transport_close_connection(t, location);
-        return resp;
+        io.Reader.free(&r)
+        cfree(ds)
+        default_transport_close_connection(t, location)
+        return resp
     }
 
-    parsed := resp.Ok->unwrap();
+    parsed := resp.Ok->unwrap()
     if !req.stream_response || !response_has_body(parsed, req.method) {
-        io.reader_free(&r);
-        cfree(ds);
+        io.Reader.free(&r)
+        cfree(ds)
         if parsed.must_close {
-            default_transport_close_connection(t, location);
+            default_transport_close_connection(t, location)
         }
-        return resp;
+        return resp
     }
 
-    live := new(Streamed_Body);
-    live.transport = t;
-    live.port = location.port;
-    live.https = location.https;
-    live.must_close = parsed.must_close;
-    live.conn = t.open_sockets[location]!;
-    t.open_sockets->remove(location);
-    live.decoder = Body_Decoder.from_response(parsed, req.method);
-    live.read_stream = Read_Stream.make(&live.conn, deadline);
+    live := new(Streamed_Body)
+    live.transport = t
+    live.port = location.port
+    live.https = location.https
+    live.must_close = parsed.must_close
+    live.conn = t.open_sockets[location]!
+    t.open_sockets->remove(location)
+    live.decoder = Body_Decoder.from_response(parsed, req.method)
+    live.read_stream = Read_Stream.make(live.conn->stream(), deadline)
 
-    leftover := r.end - r.start;
-    buf_size: u32 = 4096;
-    if leftover > buf_size do buf_size = leftover;
-    live.reader = io.reader_make(&live.read_stream.base, buf_size);
+    leftover := r.end - r.start
+    buf_size: u32 = 4096
+    if leftover > buf_size do buf_size = leftover
+    live.reader = io.Reader.make(&live.read_stream.base, buf_size)
     if leftover > 0 {
-        memory.copy(live.reader.buffer.data, r.buffer.data + r.start, leftover);
-        live.reader.end = leftover;
+        memory.copy(live.reader.buffer.data, r.buffer.data + r.start, leftover)
+        live.reader.end = leftover
     }
 
-    io.reader_free(&r);
-    cfree(ds);
+    io.Reader.free(&r)
+    cfree(ds)
 
-    parsed.live = live;
-    return resp;
+    parsed.live = live
+    return resp
 }
 
 Streamed_Body :: struct {
-    transport: &Default_Transport;
-    conn: Default_Transport_Connection;
-    port: u32;
-    https: bool;
-    read_stream: &Read_Stream;
-    reader: io.Reader;
-    decoder: Body_Decoder;
-    finished: bool;
-    failed: bool;
-    must_close: bool;
+    transport: &Default_Transport
+    conn: Default_Transport_Connection
+    port: u32
+    https: bool
+    read_stream: &Read_Stream
+    reader: io.Reader
+    decoder: Body_Decoder
+    finished: bool
+    failed: bool
+    must_close: bool
 }
 
 release_streamed_body :: (live: &Streamed_Body) {
-    if live == null || live.finished do return;
-    live.finished = true;
+    if live == null || live.finished do return
+    live.finished = true
 
-    if live.reader.buffer do io.reader_free(&live.reader);
+    if live.reader.buffer do io.Reader.free(&live.reader)
     if live.read_stream {
-        cfree(live.read_stream);
-        live.read_stream = null;
+        cfree(live.read_stream)
+        live.read_stream = null
     }
 
-    key := Conn_Key.{ live.conn.owned_host, live.port, live.https };
+    key := Conn_Key.{ live.conn.owned_host, live.port, live.https }
     if !live.failed && live.decoder->done() && !live.must_close {
         if live.transport && !live.transport.open_sockets->has(key) {
-            live.transport.open_sockets[key] = live.conn;
-            return;
+            live.transport.open_sockets[key] = live.conn
+            return
         }
     }
 
-    shutdown_connection(&live.conn);
-    if live.conn.owned_host do delete(&live.conn.owned_host);
+    shutdown_connection(&live.conn)
+    if live.conn.owned_host do delete(&live.conn.owned_host)
 }
 
 Default_Transport_Connection :: struct {
-    socket: net.Socket;
-    ssl: ? SSL;
-    owned_host: str;
-}
+    https: bool
+    socket: net.Socket
+    tls: tls.Client
+    owned_host: str
 
-Default_Transport_Connection.as_stream :: (dtc: &#Self) -> &io.Stream {
-    if !dtc.ssl {
-        return &dtc.socket;
+    stream :: (conn: &#Self) -> &io.Stream {
+        if conn.https do return &conn.tls
+        return &conn.socket
     }
-
-    return alloc.on_temp(SSL_Stream.make(dtc.ssl?));
 }
 
 Read_Stream :: struct {
-    use base: io.Stream;
-    socket: &net.Socket;
-    ssl: SSL;
-    deadline: time.Instant;
-    timed_out: bool;
+    use base: io.Stream
+    inner: &io.Stream
+    deadline: time.Instant
+    timed_out: bool
 }
 
-Read_Stream.make :: (conn: &Default_Transport_Connection, deadline: time.Instant) -> &Read_Stream {
-    s := new(Read_Stream);
-    s.base = .{ &read_stream_vtable };
-    s.socket = &conn.socket;
-    s.deadline = deadline;
-    if conn.ssl do s.ssl = conn.ssl?;
-    return s;
+Read_Stream.make :: (inner: &io.Stream, deadline: time.Instant) -> &Read_Stream {
+    s := new(Read_Stream)
+    s.base = .{ &read_stream_vtable }
+    s.inner = inner
+    s.deadline = deadline
+    return s
 }
 
 read_stream_vtable := io.Stream_Vtable.{
     read = (s: &Read_Stream, buffer: [] u8) -> Result(u32, io.Error) {
         while true {
-            if !read_stream_wait(s) do return .{ Err = .EOF };
+            if !read_stream_wait(s) do return .{ Err = .EOF }
 
-            if cast(u64, s.ssl) != 0 {
-                n := SSL_read(s.ssl, buffer.data, buffer.count);
-                if n > 0 do return .{ Ok = n };
+            result := io.Stream.read(s.inner, buffer)
+            if result.Ok do return result
 
-                err := SSL_get_error(s.ssl, n);
-                if err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE do continue;
-                return .{ Err = .EOF };
-            }
-
-            result := io.stream_read(s.socket, buffer);
-            if result.Ok do return result;
-            err := result.Err->unwrap();
-            if err == .ReadLater || err == .ReadPending || err == .NoData do continue;
-            return result;
+            err := result.Err->unwrap()
+            if err == .ReadLater || err == .ReadPending || err == .NoData do continue
+            return result
         }
 
-        return .{ Err = .EOF };
+        return .{ Err = .EOF }
     },
 
     read_byte = (s: &Read_Stream) -> Result(u8, io.Error) {
-        byte: [1] u8;
-        n := io.stream_read(&s.base, byte)?;
-        if n == 0 do return .{ Err = .EOF };
-        return .{ Ok = byte[0] };
+        byte: [1] u8
+        n := io.Stream.read(&s.base, byte)?
+        if n == 0 do return .{ Err = .EOF }
+        return .{ Ok = byte[0] }
     },
-};
+}
 
 #local
 read_stream_wait :: (s: &Read_Stream) -> bool {
-    if cast(u64, s.ssl) != 0 && SSL_pending(s.ssl) > 0 do return true;
-
-    remaining := s.deadline - time.Instant.now();
+    remaining := s.deadline - time.Instant.now()
     if remaining <= 0 {
-        s.timed_out = true;
-        return false;
+        s.timed_out = true
+        return false
     }
 
-    ms := remaining->as_ms();
-    if ms > 2000000000 do ms = 2000000000;
-    status := s.socket->poll(~~ms);
-    if status == .Readable do return true;
+    ms := remaining->as_ms()
+    if ms > 2000000000 do ms = 2000000000
 
-    s.timed_out = true;
-    return false;
+    polled := io.Stream.poll(s.inner, .Read, ~~ms)
+    if polled.Ok && polled.Ok->unwrap() do return true
+
+    s.timed_out = true
+    return false
 }

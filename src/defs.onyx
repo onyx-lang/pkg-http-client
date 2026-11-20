@@ -5,65 +5,65 @@ use core { package, string, conv, iter, io, random }
 Version :: "0.1.0"
 
 Error :: enum {
-    InvalidUrl;
-    ConnectionFailed;
-    Timeout;
-    TlsError;
-    ResponseParseFailed;
-    TooManyRedirects;
-    WriteFailed;
+    InvalidUrl
+    ConnectionFailed
+    Timeout
+    TlsError
+    ResponseParseFailed
+    TooManyRedirects
+    WriteFailed
 }
 
 Method :: enum {
-    Options;
-    Get;
-    Head;
-    Post;
-    Put;
-    Delete;
-    Trace;
-    Connect;
+    Options
+    Get
+    Head
+    Post
+    Put
+    Delete
+    Trace
+    Connect
 }
 
 Method.as_str :: (m: Method) => {
     switch m {
-        case .Options do return "OPTIONS";
-        case .Get     do return "GET";
-        case .Head    do return "HEAD";
-        case .Post    do return "POST";
-        case .Put     do return "PUT";
-        case .Delete  do return "DELETE";
-        case .Trace   do return "TRACE";
-        case .Connect do return "CONNECT";
+        case .Options do return "OPTIONS"
+        case .Get     do return "GET"
+        case .Head    do return "HEAD"
+        case .Post    do return "POST"
+        case .Put     do return "PUT"
+        case .Delete  do return "DELETE"
+        case .Trace   do return "TRACE"
+        case .Connect do return "CONNECT"
     }
 
-    return "";
+    return ""
 }
 
 // Currently, this library does not support HTTP2.
 Protocol :: enum {
-    Unknown;
-    HTTP10;
-    HTTP11;
-    HTTPS11;
+    Unknown
+    HTTP10
+    HTTP11
+    HTTPS11
 }
 
 Protocol.as_str :: (p: Protocol) => {
     switch p {
-        case .HTTP10           do return "HTTP/1.0";
-        case .HTTP11, .HTTPS11 do return "HTTP/1.1";
+        case .HTTP10           do return "HTTP/1.0"
+        case .HTTP11, .HTTPS11 do return "HTTP/1.1"
     }
 
-    return "";
+    return ""
 }
 
 Url :: struct {
-    protocol: Protocol;
-    host: str;
-    port: u32;
-    resource: str;
-    rawQuery: str;
-    fragment: str;
+    protocol: Protocol
+    host: str
+    port: u32
+    resource: str
+    rawQuery: str
+    fragment: str
 }
 
 
@@ -71,231 +71,231 @@ Url :: struct {
 /// IPv6 hosts must be wrapped in brackets: `http://[::1]:8080/`.
 /// Host and resource are substrings of `url`.
 destructure_url :: (url: str) -> ?Url {
-    protocol := Protocol.Unknown;
-    port: u32 = 0;
+    protocol := Protocol.Unknown
+    port: u32 = 0
 
-    u := url;
-    u~, fragment := str.bisect(u, #char "#");
-    u~, query    := str.bisect(u, #char "?");
+    u := url
+    u~, fragment := str.bisect(u, #char "#")
+    u~, query    := str.bisect(u, #char "?")
 
     if str.contains(u, "://") {
-        scheme := str.read_until(&u, #char ":");
+        scheme := str.read_until(&u, #char ":")
         if scheme == "http" {
-            protocol = .HTTP11;
-            port = 80;
+            protocol = .HTTP11
+            port = 80
         } elseif scheme == "https" {
-            protocol = .HTTPS11;
-            port = 443;
+            protocol = .HTTPS11
+            port = 443
         } else {
-            return .{};
+            return .{}
         }
 
-        str.advance(&u, 3);
+        str.advance(&u, 3)
     }
 
-    if !u do return .{};
+    if !u do return .{}
 
-    host_and_port := str.read_until(&u, #char "/");
+    host_and_port := str.read_until(&u, #char "/")
     if str.contains(host_and_port, #char "@") {
-        return .{};
+        return .{}
     }
 
-    host: str;
-    port_str: str;
+    host: str
+    port_str: str
     if host_and_port.count > 0 && host_and_port[0] == #char "[" {
-        end := str.index_of(host_and_port, #char "]");
-        if end < 1 do return .{};
+        end := str.index_of(host_and_port, #char "]")
+        if end < 1 do return .{}
 
-        host = host_and_port[1 .. end];
-        rest := host_and_port[end + 1 .. host_and_port.count];
+        host = host_and_port[1 .. end]
+        rest := host_and_port[end + 1 .. host_and_port.count]
         if rest {
-            if rest[0] != #char ":" do return .{};
-            port_str = rest[1 .. rest.count];
+            if rest[0] != #char ":" do return .{}
+            port_str = rest[1 .. rest.count]
         }
     } else {
-        host, port_str = str.bisect(host_and_port, #char ":");
+        host, port_str = str.bisect(host_and_port, #char ":")
     }
 
-    if !host do return .{};
+    if !host do return .{}
     if port_str {
-        parsed := parse_port(port_str);
-        if parsed == 0 do return .{};
-        port = parsed;
+        parsed := parse_port(port_str)
+        if parsed == 0 do return .{}
+        port = parsed
     }
-    if port == 0 do port = 80;
+    if port == 0 do port = 80
 
-    resource := "/";
-    if u do resource = u;
+    resource := "/"
+    if u do resource = u
 
-    return Url.{ protocol, host, port, resource, query, fragment };
+    return Url.{ protocol, host, port, resource, query, fragment }
 }
 
 #local
 parse_port :: (s: str) -> u32 {
-    if !s do return 0;
+    if !s do return 0
     for c in s {
-        if c < #char "0" || c > #char "9" do return 0;
+        if c < #char "0" || c > #char "9" do return 0
     }
 
-    parsed := conv.parse_int(s);
-    if parsed <= 0 || parsed > 65535 do return 0;
-    return ~~parsed;
+    parsed := conv.parse_int(s)
+    if parsed <= 0 || parsed > 65535 do return 0
+    return ~~parsed
 }
 
 Protocol.default_port :: (p: Protocol) -> u32 {
-    if p == .HTTPS11 do return 443;
-    return 80;
+    if p == .HTTPS11 do return 443
+    return 80
 }
 
 Protocol.is_https :: (p: Protocol) -> bool {
-    return p == .HTTPS11;
+    return p == .HTTPS11
 }
 
 resolve_redirect :: (base: Url, location: str) -> str {
-    loc := str.strip_whitespace(location);
-    if !loc do return "";
+    loc := str.strip_whitespace(location)
+    if !loc do return ""
 
     if str.contains(loc, "://") {
-        if destructure_url(loc) do return copy_str(loc);
-        return "";
+        if destructure_url(loc) do return copy_str(loc)
+        return ""
     }
 
     if str.starts_with(loc, "//") {
-        scheme := "https" if base.protocol->is_https() else "http";
-        return concat_strs(scheme, ":", loc);
+        scheme := "https" if base.protocol->is_https() else "http"
+        return concat_strs(scheme, ":", loc)
     }
 
     if loc[0] == #char "/" {
-        return format_absolute(base, loc);
+        return format_absolute(base, loc)
     }
 
     if loc[0] == #char "?" {
-        return format_absolute(base, concat_strs(base.resource, loc));
+        return format_absolute(base, concat_strs(base.resource, loc))
     }
 
-    dir := resource_dir(base.resource);
-    return format_absolute(base, concat_strs(dir, loc));
+    dir := resource_dir(base.resource)
+    return format_absolute(base, concat_strs(dir, loc))
 }
 
 #local
 resource_dir :: (resource: str) -> str {
-    if !resource do return "/";
-    slash := str.last_index_of(resource, #char "/");
-    if slash < 0 do return "/";
-    return resource[0 .. slash + 1];
+    if !resource do return "/"
+    slash := str.last_index_of(resource, #char "/")
+    if slash < 0 do return "/"
+    return resource[0 .. slash + 1]
 }
 
 #local
 format_absolute :: (base: Url, path: str) -> str {
-    scheme := "https" if base.protocol->is_https() else "http";
-    host := base.host;
-    bracket := str.contains(host, #char ":");
+    scheme := "https" if base.protocol->is_https() else "http"
+    host := base.host
+    bracket := str.contains(host, #char ":")
 
-    port := "";
+    port := ""
     if base.port != 0 && base.port != base.protocol->default_port() {
-        port = core.tprintf(":{}", base.port);
+        port = core.tprintf(":{}", base.port)
     }
 
     if bracket {
-        return concat_strs(scheme, "://[", host, "]", port, path);
+        return concat_strs(scheme, "://[", host, "]", port, path)
     }
-    return concat_strs(scheme, "://", host, port, path);
+    return concat_strs(scheme, "://", host, port, path)
 }
 
 copy_str :: (s: str) -> str {
-    if !s do return "";
-    out: [..] u8;
-    for c in s do out << c;
-    return out;
+    if !s do return ""
+    out: [..] u8
+    for c in s do out << c
+    return out
 }
 
 #local
 concat_strs :: (parts: ..str) -> str {
-    out: [..] u8;
-    for s in parts do str.concat(&out, s);
-    return out;
+    out: [..] u8
+    for s in parts do str.concat(&out, s)
+    return out
 }
 
 
 urlencode :: (s: str, allocator := context.allocator) -> str {
-    out := Array.make(u8, s.count, allocator=allocator);
-    hex := "0123456789ABCDEF";
+    out := Array.make(u8, s.count, allocator=allocator)
+    hex := "0123456789ABCDEF"
 
     for ch in s {
         if is_unreserved(ch) {
-            out << ch;
+            out << ch
         } else {
-            out << #char "%";
-            out << hex[ch >> 4];
-            out << hex[ch & 0xF];
+            out << #char "%"
+            out << hex[ch >> 4]
+            out << hex[ch & 0xF]
         }
     }
 
-    return out;
+    return out
 }
 
 #local
 is_unreserved :: (ch: u8) -> bool {
-    if ch >= #char "a" && ch <= #char "z" do return true;
-    if ch >= #char "A" && ch <= #char "Z" do return true;
-    if ch >= #char "0" && ch <= #char "9" do return true;
-    return ch == #char "-" || ch == #char "." || ch == #char "_" || ch == #char "~";
+    if ch >= #char "a" && ch <= #char "z" do return true
+    if ch >= #char "A" && ch <= #char "Z" do return true
+    if ch >= #char "0" && ch <= #char "9" do return true
+    return ch == #char "-" || ch == #char "." || ch == #char "_" || ch == #char "~"
 }
 
 urldecode :: #match #local {}
 
 #overload
 urldecode :: (s: str, allocator := context.allocator) -> str {
-    buf := make([] u8, s.count, allocator);
-    return urldecode(s, buf);
+    buf := make([] u8, s.count, allocator)
+    return urldecode(s, buf)
 }
 
 #overload
 urldecode :: (s: str, buf: [] u8) -> str {
-    c := 0;
+    c := 0
 
-    i := Iterator.from(s);
-    defer Iterator.close(i);
+    i := Iterator.from(s)
+    defer Iterator.close(i)
 
     for #no_close ch in i {
         if ch == #char "%" {
-            a := Iterator.next(i) ?? 0;
-            b := Iterator.next(i) ?? 0;
-            hi := hex_value(a);
-            lo := hex_value(b);
+            a := Iterator.next(i) ?? 0
+            b := Iterator.next(i) ?? 0
+            hi := hex_value(a)
+            lo := hex_value(b)
             if a == 0 || b == 0 || hi < 0 || lo < 0 {
-                buf[c] = ch;
-                c += 1;
+                buf[c] = ch
+                c += 1
                 if a != 0 do { buf[c] = a; c += 1; }
                 if b != 0 do { buf[c] = b; c += 1; }
             } else {
-                buf[c] = ~~((hi << 4) | lo);
-                c += 1;
+                buf[c] = ~~((hi << 4) | lo)
+                c += 1
             }
 
         } elseif ch == #char "+" {
-            buf[c] = #char " ";
-            c += 1;
+            buf[c] = #char " "
+            c += 1
         } else {
-            buf[c] = ch;
-            c += 1;
+            buf[c] = ch
+            c += 1
         }
     }
 
-    return buf.data[0 .. c];
+    return buf.data[0 .. c]
 }
 
 #local
 hex_value :: (ch: u8) -> i32 {
-    if ch >= #char "0" && ch <= #char "9" do return ~~(ch - #char "0");
-    if ch >= #char "a" && ch <= #char "f" do return ~~(ch - #char "a" + 10);
-    if ch >= #char "A" && ch <= #char "F" do return ~~(ch - #char "A" + 10);
-    return -1;
+    if ch >= #char "0" && ch <= #char "9" do return ~~(ch - #char "0")
+    if ch >= #char "a" && ch <= #char "f" do return ~~(ch - #char "a" + 10)
+    if ch >= #char "A" && ch <= #char "F" do return ~~(ch - #char "A" + 10)
+    return -1
 }
 
 Query :: struct {
-    entries: [..] QueryParam;
-    encoded: str;
+    entries: [..] QueryParam
+    encoded: str
 }
 
 QueryParam :: struct {
@@ -303,38 +303,38 @@ QueryParam :: struct {
 }
 
 Query.set :: (q: &Query, key, value: str) {
-    enc_key   := urlencode(key);
-    enc_value := urlencode(value);
+    enc_key   := urlencode(key)
+    enc_value := urlencode(value)
 
     for& e in q.entries {
         if e.key == enc_key {
-            delete(&e.value);
-            delete(&enc_key);
+            delete(&e.value)
+            delete(&enc_key)
             
-            e.value = enc_value;
-            return;
+            e.value = enc_value
+            return
         }
     }
 
     q.entries << .{
         enc_key, enc_value
-    };
+    }
 }
 
 Query.free :: (q: &Query) {
     for& e in q.entries {
-        delete(&e.key);
-        delete(&e.value);
+        delete(&e.key)
+        delete(&e.value)
     }
-    delete(&q.entries);
+    delete(&q.entries)
 
     if q.encoded {
-        delete(&q.encoded);
+        delete(&q.encoded)
     }
 }
 
 Query.remove :: (q: &Query, key: str) {
-    enc_key := urlencode(key);
+    enc_key := urlencode(key)
 
     Array.filter(&q.entries, [e](do {
         if e.key != enc_key {
@@ -346,93 +346,93 @@ Query.remove :: (q: &Query, key: str) {
         }
     }))
 
-    delete(&enc_key);
+    delete(&enc_key)
 }
 
 Query.encode :: (q: &Query) -> str {
     if q.encoded {
-        delete(&q.encoded);
+        delete(&q.encoded)
     }
 
-    res: [..] u8;
+    res: [..] u8
     for& q.entries {
-        str.concat(&res, it.key, "=", it.value, "&");
+        str.concat(&res, it.key, "=", it.value, "&")
     }
 
     if res.count > 0 {
         if res[res.count - 1] == #char "&" {
-            res.count -= 1;
+            res.count -= 1
         }
     }
 
-    q.encoded = res;
-    return q.encoded;
+    q.encoded = res
+    return q.encoded
 }
 
 
 // Used to construct a `multipart/form-data` content.
 FormData :: struct {
-    parts: [..] Attachment;
-    boundary: str;
+    parts: [..] Attachment
+    boundary: str
 
     Attachment :: struct {
-        name: str;
-        filename: str;
-        content_type: str;
+        name: str
+        filename: str
+        content_type: str
 
-        data: str;
+        data: str
     }
 }
 
 FormData.free :: (form: &FormData) {
-    Array.free(&form.parts);
+    Array.free(&form.parts)
 
     if form.boundary {
-        str.free(form.boundary);
+        str.free(form.boundary)
     }
 }
 
 FormData.get_boundary :: (form: &FormData) -> str {
-    if form.boundary do return form.boundary;
+    if form.boundary do return form.boundary
 
-    form.boundary = random.string(64, alpha_numeric=true);
-    return form.boundary;
+    form.boundary = random.string(64, alpha_numeric=true)
+    return form.boundary
 }
 
 FormData.attach :: (form: &FormData, name: str, data: str) {
     form.parts << .{
         name = name, data = data
-    };
+    }
 }
 
 FormData.attach_file :: (form: &FormData, name: str, filename: str, content_type: str, file_data: str) {
     form.parts << .{
         name = name, filename = filename,
         content_type = content_type, data = file_data
-    };
+    }
 }
 
 FormData.write :: (form: &FormData, w: &io.Writer) {
-    boundary := core.tprintf("--{}", form->get_boundary());
+    boundary := core.tprintf("--{}", form->get_boundary())
 
     for& form.parts {
-        io.write(w, boundary);
-        io.write(w, "\r\n");
-        io.write_format(w, "Content-Disposition: form-data; name={\"}", it.name);
+        w->write( boundary)
+        w->write( "\r\n")
+        w->write_format( "Content-Disposition: form-data; name={\"}", it.name)
 
         if it.filename {
-            io.write_format(w, "; filename={\"}\r\n", it.filename);
-            io.write_format(w, "Content-Type: {}\r\n", it.content_type);
+            w->write_format( "; filename={\"}\r\n", it.filename)
+            w->write_format( "Content-Type: {}\r\n", it.content_type)
         } else {
-            io.write(w, "\r\n");
+            w->write( "\r\n")
         }
 
-        io.write(w, "\r\n");
+        w->write( "\r\n")
 
-        io.write(w, it.data);
-        io.write(w, "\r\n");
+        w->write( it.data)
+        w->write( "\r\n")
     }
 
-    io.write(w, boundary);
-    io.write(w, "--\r\n");
+    w->write( boundary)
+    w->write( "--\r\n")
 }

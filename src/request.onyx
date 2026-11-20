@@ -5,24 +5,24 @@ use core.encoding.json
 use core.encoding.base64
 
 Request :: struct {
-    method: Method;
-    headers: Headers;
+    method: Method
+    headers: Headers
 
-    body: ? [] u8;
-    body_stream: &io.Stream;
-    body_length: ? i64;
-    form: &FormData;
+    body: ? [] u8
+    body_stream: &io.Stream
+    body_length: ? i64
+    form: &FormData
 
-    stream_response: bool;
+    stream_response: bool
 
-    url: Url;
-    cookies: CookieJar;
+    url: Url
+    cookies: CookieJar
 
-    timeout := 10 * time.SECOND;
+    timeout := 10 * time.SECOND
 
-    owned_query: str;
-    owned_body: str;
-    url_storage: str;
+    owned_query: str
+    owned_body: str
+    url_storage: str
 }
 
 //
@@ -37,240 +37,240 @@ new_request :: #match #local {}
 new_request :: (method: Method, url: str) -> &Request {
     req := alloc.on_heap(Request.{
         method = method,
-    });
+    })
 
     if u := destructure_url(url); u {
-        req.url = u->unwrap();
+        req.url = u->unwrap()
     }
 
-    return req;
+    return req
 }
 
 #overload
 new_request :: () -> &Request {
-    return alloc.on_heap(Request.{});
+    return alloc.on_heap(Request.{})
 }
 
 
 Request.free :: (r: &Request) {
-    r.headers->free();
-    r.cookies->free();
+    r.headers->free()
+    r.cookies->free()
 
-    if r.owned_query do delete(&r.owned_query);
-    if r.owned_body do delete(&r.owned_body);
-    if r.url_storage do delete(&r.url_storage);
+    if r.owned_query do delete(&r.owned_query)
+    if r.owned_body do delete(&r.owned_body)
+    if r.url_storage do delete(&r.url_storage)
 
-    cfree(r);
+    cfree(r)
 }
 
 Request.set_url :: (r: &Request, url: str) {
-    u := destructure_url(url);
+    u := destructure_url(url)
     if u {
-        r.url = u->unwrap();
+        r.url = u->unwrap()
     }
 }
 
 Request.set_method :: (r: &Request, method: Method) {
-    r.method = method;
+    r.method = method
 }
 
 Request.set_cookie :: (r: &Request, key, value: str) {
-    r.cookies->set(.{ key, value });
+    r.cookies->set(.{ key, value })
 }
 
 Request.set_query :: (r: &Request, q: &Query) {
-    if r.owned_query do delete(&r.owned_query);
+    if r.owned_query do delete(&r.owned_query)
 
-    encoded := q->encode();
-    r.owned_query = copy_str(encoded);
-    r.url.rawQuery = r.owned_query;
+    encoded := q->encode()
+    r.owned_query = copy_str(encoded)
+    r.url.rawQuery = r.owned_query
 }
 
 Request.set_basic_auth :: (r: &Request, user, pass: str) {
-    raw := core.tprintf("{}:{}", user, pass);
-    encoded := base64.encode(raw);
-    defer delete(&encoded);
-    r.headers->set("Authorization", core.tprintf("Basic {}", encoded));
+    raw := core.tprintf("{}:{}", user, pass)
+    encoded := base64.encode(raw)
+    defer delete(&encoded)
+    r.headers->set("Authorization", core.tprintf("Basic {}", encoded))
 }
 
 Request.set_bearer :: (r: &Request, token: str) {
-    r.headers->set("Authorization", core.tprintf("Bearer {}", token));
+    r.headers->set("Authorization", core.tprintf("Bearer {}", token))
 }
 
 Request.set_form_urlencoded :: (r: &Request, q: &Query) {
-    if r.owned_body do delete(&r.owned_body);
+    if r.owned_body do delete(&r.owned_body)
 
-    r.owned_body = copy_str(q->encode());
-    r.body = r.owned_body;
-    r.form = null;
-    r.headers->set("Content-Type", "application/x-www-form-urlencoded");
+    r.owned_body = copy_str(q->encode())
+    r.body = r.owned_body
+    r.form = null
+    r.headers->set("Content-Type", "application/x-www-form-urlencoded")
 }
 
 Request.set_body :: #match {
     (r: &Request, body: str) {
-        r.body = body;
-        r.body_stream = null;
+        r.body = body
+        r.body_stream = null
     }
 }
 
 Request.set_body_stream :: #match {
     (r: &Request, body: &io.Stream) {
-        r.body_stream = body;
-        r.body_length = .{};
-        r.body = .{};
-        r.form = null;
+        r.body_stream = body
+        r.body_length = .{}
+        r.body = .{}
+        r.form = null
     }
 
     (r: &Request, body: &io.Stream, length: i64) {
-        r.body_stream = body;
-        r.body_length = length;
-        r.body = .{};
-        r.form = null;
+        r.body_stream = body
+        r.body_length = length
+        r.body = .{}
+        r.form = null
     }
 }
 
 Request.set_form :: (r: &Request, form: &FormData) {
-    r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()));
-    r.form = form;
+    r.headers->set("Content-Type", core.tprintf("multipart/form-data; boundary={\"}", form->get_boundary()))
+    r.form = form
 
     // Clear the body, because the form replaces it.
-    r.body = .{};
+    r.body = .{}
 }
 
 Request.write :: (r: &Request, w: &io.Writer) -> bool {
-    io.writer_consume_error(w);
+    w->consume_error()
 
-    io.write_format(w, "{} {}",
+    w->write_format( "{} {}",
         str.as_str(r.method),
-        r.url.resource);
+        r.url.resource)
     
     if r.url.rawQuery {
-        io.write_format(w, "?{}", r.url.rawQuery);
+        w->write_format( "?{}", r.url.rawQuery)
     }
 
-    io.write_format(w, " {}\r\n", str.as_str(r.url.protocol));
+    w->write_format( " {}\r\n", str.as_str(r.url.protocol))
 
     if str.contains(r.url.host, #char ":") {
-        io.write_format(w, "Host: [{}]", r.url.host);
+        w->write_format( "Host: [{}]", r.url.host)
     } else {
-        io.write_format(w, "Host: {}", r.url.host);
+        w->write_format( "Host: {}", r.url.host)
     }
     if r.url.port != 0 && r.url.port != r.url.protocol->default_port() {
-        io.write_format(w, ":{}", r.url.port);
+        w->write_format( ":{}", r.url.port)
     }
-    io.write(w, "\r\n");
+    w->write( "\r\n")
 
-    r.cookies->write_header(r.url, w);
+    r.cookies->write_header(r.url, w)
 
     if r.body_stream {
         if r.body_length {
-            length := r.body_length->unwrap();
-            if length < 0 do return false;
-            r.headers->delete("transfer-encoding");
-            r.headers->set("Content-Length", core.tprintf("{}", length));
+            length := r.body_length->unwrap()
+            if length < 0 do return false
+            r.headers->delete("transfer-encoding")
+            r.headers->set("Content-Length", core.tprintf("{}", length))
         } else {
-            r.headers->delete("content-length");
-            r.headers->set("Transfer-Encoding", "chunked");
+            r.headers->delete("content-length")
+            r.headers->set("Transfer-Encoding", "chunked")
         }
 
-        r.headers->write(w);
-        io.write(w, "\r\n");
-        io.writer_flush(w);
-        if io.writer_consume_error(w) != .None do return false;
+        r.headers->write(w)
+        w->write( "\r\n")
+        w->flush()
+        if w->consume_error() != .None do return false
 
         if r.body_length {
-            return write_stream_length(w.stream, r.body_stream, r.body_length->unwrap());
+            return write_stream_length(w.stream, r.body_stream, r.body_length->unwrap())
         }
-        return write_stream_chunked(w.stream, r.body_stream);
+        return write_stream_chunked(w.stream, r.body_stream)
     }
 
     body := r.body ?? do {
-        if !r.form do return null_str;
+        if !r.form do return null_str
 
-        w, sb := io.string_builder();
-        defer delete(sb);
+        w, sb := io.Writer.string_builder()
+        defer delete(sb)
 
-        r.form->write(&w);
+        r.form->write(&w)
 
-        return str.temp_copy(str.as_str(sb));
-    };
-
-    r.headers->set("Content-Length", core.tprintf("{}", body.count));
-
-    r.headers->write(w);
-
-    io.write(w, "\r\n");
-    if body {
-        io.write(w, body);
+        return str.temp_copy(str.as_str(sb))
     }
 
-    io.writer_flush(w);
+    r.headers->set("Content-Length", core.tprintf("{}", body.count))
 
-    return io.writer_consume_error(w) == .None;
+    r.headers->write(w)
+
+    w->write( "\r\n")
+    if body {
+        w->write( body)
+    }
+
+    w->flush()
+
+    return w->consume_error() == .None
 }
 
 
 #overload
 Request.set_body :: (r: &Request, v: json.Value) {
-    encoded_string := json.encode_string(v)!;
-    r.body = encoded_string;
-    r.body_stream = null;
+    encoded_string := json.encode_string(v)!
+    r.body = encoded_string
+    r.body_stream = null
 }
 
 #local
 write_all :: (s: &io.Stream, buf: [] u8) -> bool {
-    off: u32 = 0;
+    off: u32 = 0
     while off < buf.count {
-        result := io.stream_write(s, buf[off .. buf.count]);
-        if result.Err do return false;
-        n := result.Ok->unwrap();
-        if n == 0 do return false;
-        off += n;
+        result := io.Stream.write(s, buf[off .. buf.count])
+        if result.Err do return false
+        n := result.Ok->unwrap()
+        if n == 0 do return false
+        off += n
     }
-    return true;
+    return true
 }
 
 #local
 write_stream_length :: (dst, src: &io.Stream, length: i64) -> bool {
-    left := length;
-    buf: [1024] u8;
+    left := length
+    buf: [1024] u8
     while left > 0 {
-        want: u32 = 1024;
-        if left < 1024 do want = ~~left;
+        want: u32 = 1024
+        if left < 1024 do want = ~~left
 
-        result := io.stream_read(src, buf[0 .. want]);
-        if result.Err do return false;
-        n := result.Ok->unwrap();
-        if n == 0 do return false;
-        if !write_all(dst, buf[0 .. n]) do return false;
-        left -= cast(i64) n;
+        result := io.Stream.read(src, buf[0 .. want])
+        if result.Err do return false
+        n := result.Ok->unwrap()
+        if n == 0 do return false
+        if !write_all(dst, buf[0 .. n]) do return false
+        left -= cast(i64) n
     }
-    return true;
+    return true
 }
 
 #local
 write_stream_chunked :: (dst, src: &io.Stream) -> bool {
-    buf: [1024] u8;
+    buf: [1024] u8
     while true {
-        result := io.stream_read(src, buf);
+        result := io.Stream.read(src, buf)
         if result.Err {
-            if result.Err->unwrap() != .EOF do return false;
-            break;
+            if result.Err->unwrap() != .EOF do return false
+            break
         }
-        n := result.Ok->unwrap();
-        if n == 0 do break;
-        if !write_chunk(dst, buf[0 .. n]) do return false;
+        n := result.Ok->unwrap()
+        if n == 0 do break
+        if !write_chunk(dst, buf[0 .. n]) do return false
     }
-    return write_all(dst, "0\r\n\r\n");
+    return write_all(dst, "0\r\n\r\n")
 }
 
 #local
 write_chunk :: (dst: &io.Stream, data: [] u8) -> bool {
-    hexbuf: [32] u8;
-    hex := conv.u64_to_str(cast(u64) data.count, 16, hexbuf);
-    if !write_all(dst, hex) do return false;
-    if !write_all(dst, "\r\n") do return false;
-    if !write_all(dst, data) do return false;
-    return write_all(dst, "\r\n");
+    hexbuf: [32] u8
+    hex := conv.format_int(cast(i64) data.count, 16, hexbuf)
+    if !write_all(dst, hex) do return false
+    if !write_all(dst, "\r\n") do return false
+    if !write_all(dst, data) do return false
+    return write_all(dst, "\r\n")
 }
 

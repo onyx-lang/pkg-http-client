@@ -7,166 +7,166 @@ RequestBuilder :: #distinct &_RequestBuilder
 
 #local
 _RequestBuilder :: struct {
-    client: &Client;
-    query: Query;
-    form: ? FormData;
+    client: &Client
+    query: Query
+    form: ? FormData
 
-    request: &Request;
+    request: &Request
 
     // TODO: Keep track of allocator used to allocate this string.
-    body_to_free: str;
+    body_to_free: str
 }
 
 request_builder :: (client: &Client) -> RequestBuilder {
-    r := new(_RequestBuilder);
+    r := new(_RequestBuilder)
 
-    r.client = client;
-    r.query = .{};
-    r.form  = .{};
-    r.request = client->new_request();
+    r.client = client
+    r.query = .{}
+    r.form  = .{}
+    r.request = client->new_request()
 
-    return RequestBuilder.{r};
+    return RequestBuilder.{r}
 }
 
 RequestBuilder.set_method :: (rb: RequestBuilder, method: Method) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_method(method);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_method(method)
+    return rb
 }
 
 RequestBuilder.set_url :: (rb: RequestBuilder, url: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_url(url);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_url(url)
+    return rb
 }
 
 RequestBuilder.set_header :: (rb: RequestBuilder, header: str, value: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.headers->set(header, value);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.headers->set(header, value)
+    return rb
 }
 
 RequestBuilder.add_header :: (rb: RequestBuilder, header: str, value: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.headers->add(header, value);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.headers->add(header, value)
+    return rb
 }
 
 RequestBuilder.delete_header :: (rb: RequestBuilder, header: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.headers->delete(header);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.headers->delete(header)
+    return rb
 }
 
 RequestBuilder.set_cookie :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.cookies->set(.{key, value});
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.cookies->set(.{key, value})
+    return rb
 }
 
 RequestBuilder.delete_cookie :: (rb: RequestBuilder, key: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.cookies->delete(key);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.cookies->delete(key)
+    return rb
 }
 
 RequestBuilder.set_query :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.query->set(key, value);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.query->set(key, value)
+    return rb
 }
 
 RequestBuilder.set_timeout :: (rb: RequestBuilder, timeout: time.Duration) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request.timeout = timeout;
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request.timeout = timeout
+    return rb
 }
 
 RequestBuilder.set_basic_auth :: (rb: RequestBuilder, user, pass: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_basic_auth(user, pass);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_basic_auth(user, pass)
+    return rb
 }
 
 RequestBuilder.set_bearer :: (rb: RequestBuilder, token: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_bearer(token);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_bearer(token)
+    return rb
 }
 
 RequestBuilder.set_form_urlencoded :: (rb: RequestBuilder, query: &Query) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_form_urlencoded(query);
-    return rb;
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_form_urlencoded(query)
+    return rb
 }
 
 RequestBuilder.set_body :: #match {
     (rb: RequestBuilder, body: $T) -> RequestBuilder {
-        r := cast(&_RequestBuilder, rb);
-        r.request->set_body(body);
-        return rb;
+        r := cast(&_RequestBuilder, rb)
+        r.request->set_body(body)
+        return rb
     }
 }
 
 RequestBuilder.set_body_stream :: #match {
     (rb: RequestBuilder, body: &io.Stream) -> RequestBuilder {
-        r := cast(&_RequestBuilder, rb);
-        r.request->set_body_stream(body);
-        return rb;
+        r := cast(&_RequestBuilder, rb)
+        r.request->set_body_stream(body)
+        return rb
     }
 
     (rb: RequestBuilder, body: &io.Stream, length: i64) -> RequestBuilder {
-        r := cast(&_RequestBuilder, rb);
-        r.request->set_body_stream(body, length);
-        return rb;
+        r := cast(&_RequestBuilder, rb)
+        r.request->set_body_stream(body, length)
+        return rb
     }
 }
 
 RequestBuilder.add_form_value :: (rb: RequestBuilder, key, value: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
+    r := cast(&_RequestBuilder, rb)
     if !r.form {
-        r.form = FormData.{};
+        r.form = FormData.{}
     }
 
-    r.form->unwrap_ptr()->attach(key, value);
-    return rb;
+    r.form->unwrap_ptr()->attach(key, value)
+    return rb
 }
 
 RequestBuilder.attach_file :: (rb: RequestBuilder, name: str, filename: str, content_type: str, file_data: str) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
+    r := cast(&_RequestBuilder, rb)
     if !r.form {
-        r.form = FormData.{};
+        r.form = FormData.{}
     }
 
-    r.form->unwrap_ptr()->attach_file(name, filename, content_type, file_data);
-    return rb;
+    r.form->unwrap_ptr()->attach_file(name, filename, content_type, file_data)
+    return rb
 }
 
 RequestBuilder.cleanup :: (rb: RequestBuilder) {
-    r := cast(&_RequestBuilder, rb);
-    r.query->free();
+    r := cast(&_RequestBuilder, rb)
+    r.query->free()
 
     if r.body_to_free {
-        delete(&r.body_to_free);
+        delete(&r.body_to_free)
     }
 
     if r.form {
-        r.form->unwrap_ptr()->free();
+        r.form->unwrap_ptr()->free()
     }
 
-    r.request->free();
-    cfree(r);
+    r.request->free()
+    cfree(r)
 }
 
 RequestBuilder.prepare :: (rb: RequestBuilder) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
-    r.request->set_query(&r.query);
+    r := cast(&_RequestBuilder, rb)
+    r.request->set_query(&r.query)
 
     if r.form {
-        r.request->set_form(r.form->unwrap_ptr());
+        r.request->set_form(r.form->unwrap_ptr())
     }
 
-    return rb;
+    return rb
 }
 
 //
@@ -174,44 +174,44 @@ RequestBuilder.prepare :: (rb: RequestBuilder) -> RequestBuilder {
 // responsible for calling RequestBuilder->cleanup() later,
 // but if you know what you're doing, you'll be fine.
 RequestBuilder.get_request :: (rb: RequestBuilder) -> &Request {
-    return cast(&_RequestBuilder, rb).request;
+    return cast(&_RequestBuilder, rb).request
 }
 
 RequestBuilder.send :: (rb: RequestBuilder) -> Result(&Response, Error) {
-    return rb->dispatch(false);
+    return rb->dispatch(false)
 }
 
 RequestBuilder.open :: (rb: RequestBuilder) -> Result(&Response, Error) {
-    return rb->dispatch(true);
+    return rb->dispatch(true)
 }
 
 #local
 RequestBuilder.dispatch :: (rb: RequestBuilder, stream: bool) -> Result(&Response, Error) {
-    rb->prepare();
+    rb->prepare()
 
-    r := cast(&_RequestBuilder, rb);
-    resp: Result(&Response, Error);
+    r := cast(&_RequestBuilder, rb)
+    resp: Result(&Response, Error)
     if stream {
-        resp = r.client->open(r.request);
+        resp = r.client->open(r.request)
     } else {
-        resp = r.client->send(r.request);
+        resp = r.client->send(r.request)
     }
 
-    rb->cleanup();
-    return resp;
+    rb->cleanup()
+    return resp
 }
 
 RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
-    r := cast(&_RequestBuilder, rb);
+    r := cast(&_RequestBuilder, rb)
 
     // This almost always requires json.Use_Any_Encoder to be true.
     // But that may be true by default soon anyway.
-    json_string := json.encode_string(v);
+    json_string := json.encode_string(v)
 
-    r.body_to_free = json_string;
-    r.request->set_body(json_string);
-    r.request.headers->set("content-type", "application/json");
+    r.body_to_free = json_string
+    r.request->set_body(json_string)
+    r.request.headers->set("content-type", "application/json")
 
-    return rb;
+    return rb
 }
 

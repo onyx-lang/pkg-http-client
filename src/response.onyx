@@ -4,566 +4,566 @@ use core {conv, io, string, memory, Result}
 use core.encoding.json
 
 Response :: struct {
-    status: u32;
-    protocol: Protocol;
-    headers: Headers;
-    body: [] u8;
-    body_pos: u32;
-    must_close: bool;
-    live: &Streamed_Body;
+    status: u32
+    protocol: Protocol
+    headers: Headers
+    body: [] u8
+    body_pos: u32
+    must_close: bool
+    live: &Streamed_Body
 }
 
-Response.make :: () => new(#Self);
+Response.make :: () => new(#Self)
 
 Response.free :: (r: &Response) {
-    if r == null do return;
+    if r == null do return
 
     if r.live {
-        release_streamed_body(r.live);
-        cfree(r.live);
-        r.live = null;
+        release_streamed_body(r.live)
+        cfree(r.live)
+        r.live = null
     }
 
-    r.headers->free();
-    delete(&r.body);
-    cfree(r);
+    r.headers->free()
+    delete(&r.body)
+    cfree(r)
 }
 
 Response.read :: (r: &Response, dest: [] u8) -> Result(u32, Error) {
-    if r.live do return read_live(r, dest);
-    if r.body_pos >= r.body.count do return .{ Ok = 0 };
+    if r.live do return read_live(r, dest)
+    if r.body_pos >= r.body.count do return .{ Ok = 0 }
 
-    n := r.body.count - r.body_pos;
-    if n > dest.count do n = dest.count;
-    memory.copy(dest.data, r.body.data + r.body_pos, n);
-    r.body_pos += n;
-    return .{ Ok = n };
+    n := r.body.count - r.body_pos
+    if n > dest.count do n = dest.count
+    memory.copy(dest.data, r.body.data + r.body_pos, n)
+    r.body_pos += n
+    return .{ Ok = n }
 }
 
 Response.read_all :: (r: &Response) -> Result([] u8, Error) {
-    if !r.live do return .{ Ok = r.body };
+    if !r.live do return .{ Ok = r.body }
 
-    out: [..] u8;
-    buf: [1024] u8;
+    out: [..] u8
+    buf: [1024] u8
     while true {
-        n := r->read(buf)?;
-        if n == 0 do break;
+        n := r->read(buf)?
+        if n == 0 do break
 
-        Array.ensure_capacity(&out, out.count + n);
-        memory.copy(out.data + out.count, &buf[0], n);
-        out.count += n;
+        Array.ensure_capacity(&out, out.count + n)
+        memory.copy(out.data + out.count, &buf[0], n)
+        out.count += n
     }
 
-    delete(&r.body);
-    r.body = out;
-    return .{ Ok = r.body };
+    delete(&r.body)
+    r.body = out
+    return .{ Ok = r.body }
 }
 
 Response.is_success :: (r: &Response) -> bool {
-    return r.status >= 200 && r.status < 300;
+    return r.status >= 200 && r.status < 300
 }
 
 Response.is_redirect :: (r: &Response) -> bool {
-    return r.status >= 300 && r.status < 400;
+    return r.status >= 300 && r.status < 400
 }
 
 Response.is_client_error :: (r: &Response) -> bool {
-    return r.status >= 400 && r.status < 500;
+    return r.status >= 400 && r.status < 500
 }
 
 Response.is_server_error :: (r: &Response) -> bool {
-    return r.status >= 500 && r.status < 600;
+    return r.status >= 500 && r.status < 600
 }
 
-Response.as_json :: (r: &Response) => json.decode(r.body);
+Response.as_json :: (r: &Response) => json.decode(r.body)
 
 Response.as_json_into :: (r: &Response, $T: type_expr) -> T {
-    data := json.decode(r.body)!;
-    defer json.free(data);
+    data := json.decode(r.body)!
+    defer json.free(data)
 
-    t: T;
-    json.as_any(data.root, &t);
+    t: T
+    json.as_any(data.root, &t)
 
-    return t;
+    return t
 }
 
 #package
 parse_response :: (r: &io.Reader, method: Method, read_body := true) -> Result(&Response, Error) {
-    interim := 0;
+    interim := 0
     while true {
-        resp := Response.make();
-        parsed := parse_one(r, method, resp, read_body);
+        resp := Response.make()
+        parsed := parse_one(r, method, resp, read_body)
         if parsed.Err {
-            resp->free();
-            return .{ Err = parsed.Err->unwrap() };
+            resp->free()
+            return .{ Err = parsed.Err->unwrap() }
         }
 
         if resp.status >= 100 && resp.status < 200 && resp.status != 101 {
-            interim += 1;
-            resp->free();
-            if interim > 8 do return .{ Err = .ResponseParseFailed };
-            continue;
+            interim += 1
+            resp->free()
+            if interim > 8 do return .{ Err = .ResponseParseFailed }
+            continue
         }
 
-        return .{ Ok = resp };
+        return .{ Ok = resp }
     }
 
-    return .{ Err = .ResponseParseFailed };
+    return .{ Err = .ResponseParseFailed }
 }
 
 #local
 parse_one :: (r: &io.Reader, method: Method, resp: &Response, read_body: bool) -> Result(bool, Error) {
-    status_line := r->read_line(consume_newline=true, inplace=true);
-    status_line = str.strip_whitespace(status_line);
-    if !status_line do return .{ Err = .ResponseParseFailed };
+    status_line := r->read_line(consume_newline=true, inplace=true)
+    status_line = str.strip_whitespace(status_line)
+    if !status_line do return .{ Err = .ResponseParseFailed }
 
-    protocol, rest := str.bisect(status_line, #char " ");
+    protocol, rest := str.bisect(status_line, #char " ")
     if protocol == "HTTP/1.1" {
-        resp.protocol = .HTTP11;
+        resp.protocol = .HTTP11
     } elseif protocol == "HTTP/1.0" {
-        resp.protocol = .HTTP10;
+        resp.protocol = .HTTP10
     } else {
-        return .{ Err = .ResponseParseFailed };
+        return .{ Err = .ResponseParseFailed }
     }
 
-    resp.status = ~~ conv.parse_int(rest);
-    if resp.status == 0 do return .{ Err = .ResponseParseFailed };
+    resp.status = ~~ conv.parse_int(rest)
+    if resp.status == 0 do return .{ Err = .ResponseParseFailed }
 
-    resp.headers = Headers.make();
+    resp.headers = Headers.make()
 
     while true {
-        line := r->read_line(consume_newline=true);
-        defer delete(&line);
+        line := r->read_line(consume_newline=true)
+        defer delete(&line)
 
-        key, value := str.bisect(line, #char ":");
-        key = str.strip_whitespace(key);
-        value = str.strip_whitespace(value);
-        if !key && !value do break;
-        if !key || !str.contains(line, #char ":") do return .{ Err = .ResponseParseFailed };
+        key, value := str.bisect(line, #char ":")
+        key = str.strip_whitespace(key)
+        value = str.strip_whitespace(value)
+        if !key && !value do break
+        if !key || !str.contains(line, #char ":") do return .{ Err = .ResponseParseFailed }
 
-        resp.headers->add(key, value);
+        resp.headers->add(key, value)
     }
 
     if connection_has(resp.headers->get("connection"), "close") {
-        resp.must_close = true;
+        resp.must_close = true
     } elseif resp.protocol == .HTTP10 && !connection_has(resp.headers->get("connection"), "keep-alive") {
-        resp.must_close = true;
+        resp.must_close = true
     }
 
-    kind, length, ok := classify_body(resp, method);
-    if !ok do return .{ Err = .ResponseParseFailed };
+    kind, length, ok := classify_body(resp, method)
+    if !ok do return .{ Err = .ResponseParseFailed }
     if kind == .None {
-        if resp.status == 101 do resp.must_close = true;
-        resp.body = .[];
-        return .{ Ok = true };
+        if resp.status == 101 do resp.must_close = true
+        resp.body = .[]
+        return .{ Ok = true }
     }
-    if kind == .UntilEof do resp.must_close = true;
+    if kind == .UntilEof do resp.must_close = true
     if !read_body {
-        resp.body = .[];
-        return .{ Ok = true };
+        resp.body = .[]
+        return .{ Ok = true }
     }
 
-    body: [..] u8;
+    body: [..] u8
     if kind == .Chunked {
         if !read_chunked_body(r, &body) {
-            delete(&body);
-            return .{ Err = .ResponseParseFailed };
+            delete(&body)
+            return .{ Err = .ResponseParseFailed }
         }
     } elseif kind == .Length {
         if length > 0 && !read_exact(r, &body, ~~length) {
-            delete(&body);
-            return .{ Err = .ResponseParseFailed };
+            delete(&body)
+            return .{ Err = .ResponseParseFailed }
         }
     } else {
-        read_until_eof(r, &body);
+        read_until_eof(r, &body)
     }
 
-    resp.body = body;
-    return .{ Ok = true };
+    resp.body = body
+    return .{ Ok = true }
 }
 
 Body_Kind :: enum {
-    None;
-    Length;
-    Chunked;
-    UntilEof;
+    None
+    Length
+    Chunked
+    UntilEof
 }
 
 #local
 classify_body :: (resp: &Response, method: Method) -> (Body_Kind, i64, bool) {
     if method == .Head || resp.status == 204 || resp.status == 304 || (resp.status >= 100 && resp.status < 200) {
-        return .None, 0, true;
+        return .None, 0, true
     }
     if transfer_is_chunked(resp.headers->get("transfer-encoding")) {
-        return .Chunked, 0, true;
+        return .Chunked, 0, true
     }
     if resp.headers->has("content-length") {
-        length_text := str.strip_whitespace(resp.headers->get("content-length"));
-        if !length_text do return .Length, 0, true;
-        if !all_digits(length_text) do return .None, 0, false;
-        return .Length, conv.parse_int(length_text), true;
+        length_text := str.strip_whitespace(resp.headers->get("content-length"))
+        if !length_text do return .Length, 0, true
+        if !all_digits(length_text) do return .None, 0, false
+        return .Length, conv.parse_int(length_text), true
     }
-    return .UntilEof, 0, true;
+    return .UntilEof, 0, true
 }
 
 #local
 read_chunked_body :: (r: &io.Reader, body: &[..] u8) -> bool {
     while true {
-        line := r->read_line(consume_newline=true);
-        defer delete(&line);
+        line := r->read_line(consume_newline=true)
+        defer delete(&line)
 
-        size_text, _ := str.bisect(line, #char ";");
-        size_text = str.strip_whitespace(size_text);
-        if !size_text || !all_hex(size_text) do return false;
+        size_text, _ := str.bisect(line, #char ";")
+        size_text = str.strip_whitespace(size_text)
+        if !size_text || !all_hex(size_text) do return false
 
-        chunk_size := ~~ conv.parse_int(size_text, base=16);
-        if chunk_size == 0 do break;
+        chunk_size := ~~ conv.parse_int(size_text, base=16)
+        if chunk_size == 0 do break
 
-        if !read_exact(r, body, ~~chunk_size) do return false;
+        if !read_exact(r, body, ~~chunk_size) do return false
 
-        crlf := r->read_line(consume_newline=true);
-        defer delete(&crlf);
+        crlf := r->read_line(consume_newline=true)
+        defer delete(&crlf)
     }
 
     while !r.done || r.start < r.end {
-        line := r->read_line(consume_newline=true);
-        defer delete(&line);
-        if !str.strip_whitespace(line) do break;
-        if r.done && r.start == r.end do break;
+        line := r->read_line(consume_newline=true)
+        defer delete(&line)
+        if !str.strip_whitespace(line) do break
+        if r.done && r.start == r.end do break
     }
 
-    return true;
+    return true
 }
 
 #local
 read_exact :: (r: &io.Reader, body: &[..] u8, n: u32) -> bool {
-    remaining := n;
+    remaining := n
     while remaining > 0 {
         if r.start < r.end {
-            available := r.end - r.start;
-            take := available if available < remaining else remaining;
-            Array.ensure_capacity(body, body.count + take);
-            memory.copy(body.data + body.count, r.buffer.data + r.start, take);
-            body.count += take;
-            r.start += take;
-            remaining -= take;
-            continue;
+            available := r.end - r.start
+            take := available if available < remaining else remaining
+            Array.ensure_capacity(body, body.count + take)
+            memory.copy(body.data + body.count, r.buffer.data + r.start, take)
+            body.count += take
+            r.start += take
+            remaining -= take
+            continue
         }
 
-        if r.done do return false;
-        b := r->read_byte();
-        if r.done && r.start == r.end do return false;
+        if r.done do return false
+        b := r->read_byte()
+        if r.done && r.start == r.end do return false
 
-        Array.ensure_capacity(body, body.count + 1);
-        body.data[body.count] = b;
-        body.count += 1;
-        remaining -= 1;
+        Array.ensure_capacity(body, body.count + 1)
+        body.data[body.count] = b
+        body.count += 1
+        remaining -= 1
     }
 
-    return true;
+    return true
 }
 
 #local
 read_until_eof :: (r: &io.Reader, body: &[..] u8) {
     while true {
         if r.start < r.end {
-            take := r.end - r.start;
-            Array.ensure_capacity(body, body.count + take);
-            memory.copy(body.data + body.count, r.buffer.data + r.start, take);
-            body.count += take;
-            r.start = r.end;
-            continue;
+            take := r.end - r.start
+            Array.ensure_capacity(body, body.count + take)
+            memory.copy(body.data + body.count, r.buffer.data + r.start, take)
+            body.count += take
+            r.start = r.end
+            continue
         }
 
-        if r.done do return;
+        if r.done do return
 
-        b := r->read_byte();
-        if r.done && r.start == r.end do return;
+        b := r->read_byte()
+        if r.done && r.start == r.end do return
 
-        Array.ensure_capacity(body, body.count + 1);
-        body.data[body.count] = b;
-        body.count += 1;
+        Array.ensure_capacity(body, body.count + 1)
+        body.data[body.count] = b
+        body.count += 1
     }
 }
 
 #local
 transfer_is_chunked :: (value: str) -> bool {
-    return header_has_token(value, "chunked");
+    return header_has_token(value, "chunked")
 }
 
 #local
 connection_has :: (value, token: str) -> bool {
-    return header_has_token(value, token);
+    return header_has_token(value, token)
 }
 
 #local
 header_has_token :: (value, token: str) -> bool {
-    rest := value;
+    rest := value
     while rest {
-        part := rest;
+        part := rest
         if idx := str.index_of(rest, #char ","); idx >= 0 {
-            part = rest[0 .. idx];
-            rest = rest[idx + 1 .. rest.count];
+            part = rest[0 .. idx]
+            rest = rest[idx + 1 .. rest.count]
         } else {
-            rest = "";
+            rest = ""
         }
-        part = str.strip_whitespace(part);
-        if str.equal_insensitive(part, token) do return true;
+        part = str.strip_whitespace(part)
+        if str.equal_insensitive(part, token) do return true
     }
-    return false;
+    return false
 }
 
 #local
 all_digits :: (s: str) -> bool {
-    if !s do return false;
+    if !s do return false
     for c in s {
-        if c < #char "0" || c > #char "9" do return false;
+        if c < #char "0" || c > #char "9" do return false
     }
-    return true;
+    return true
 }
 
 Body_Phase :: enum {
-    Length;
-    ChunkSize;
-    ChunkData;
-    ChunkCRLF;
-    Trailers;
-    UntilEof;
-    Done;
+    Length
+    ChunkSize
+    ChunkData
+    ChunkCRLF
+    Trailers
+    UntilEof
+    Done
 }
 
 Body_Decoder :: struct {
-    phase: Body_Phase;
-    remaining: i64;
-    line: [64] u8;
-    line_len: u32;
-    failed: bool;
+    phase: Body_Phase
+    remaining: i64
+    line: [64] u8
+    line_len: u32
+    failed: bool
 }
 
 Body_Decoder.from_response :: (resp: &Response, method: Method) -> Body_Decoder {
-    d: Body_Decoder;
-    kind, length, ok := classify_body(resp, method);
+    d: Body_Decoder
+    kind, length, ok := classify_body(resp, method)
     if !ok {
-        d.failed = true;
-        d.phase = .Done;
-        return d;
+        d.failed = true
+        d.phase = .Done
+        return d
     }
 
     switch kind {
         case .None {
-            d.phase = .Done;
+            d.phase = .Done
         }
         case .Length {
-            d.phase = .Length;
-            d.remaining = length;
-            if length == 0 do d.phase = .Done;
+            d.phase = .Length
+            d.remaining = length
+            if length == 0 do d.phase = .Done
         }
         case .Chunked {
-            d.phase = .ChunkSize;
+            d.phase = .ChunkSize
         }
         case .UntilEof {
-            d.phase = .UntilEof;
+            d.phase = .UntilEof
         }
     }
-    return d;
+    return d
 }
 
 Body_Decoder.done :: (d: &Body_Decoder) -> bool {
-    return d.phase == .Done && !d.failed;
+    return d.phase == .Done && !d.failed
 }
 
 Body_Decoder.read :: (d: &Body_Decoder, r: &io.Reader, dest: [] u8) -> Result(u32, Error) {
-    if d.failed do return .{ Err = .ResponseParseFailed };
-    if d.phase == .Done || dest.count == 0 do return .{ Ok = 0 };
+    if d.failed do return .{ Err = .ResponseParseFailed }
+    if d.phase == .Done || dest.count == 0 do return .{ Ok = 0 }
 
-    written: u32 = 0;
+    written: u32 = 0
     while written < dest.count && d.phase != .Done {
         switch d.phase {
             case .Length {
                 if d.remaining <= 0 {
-                    d.phase = .Done;
-                    break;
+                    d.phase = .Done
+                    break
                 }
-                n := copy_limited(r, dest[written .. dest.count], d.remaining);
+                n := copy_limited(r, dest[written .. dest.count], d.remaining)
                 if n == 0 {
-                    d.failed = true;
-                    return .{ Err = .ResponseParseFailed };
+                    d.failed = true
+                    return .{ Err = .ResponseParseFailed }
                 }
-                written += n;
-                d.remaining -= cast(i64) n;
-                if d.remaining == 0 do d.phase = .Done;
+                written += n
+                d.remaining -= cast(i64) n
+                if d.remaining == 0 do d.phase = .Done
             }
             case .UntilEof {
-                n := copy_limited(r, dest[written .. dest.count], 0x7fffffff);
+                n := copy_limited(r, dest[written .. dest.count], 0x7fffffff)
                 if n == 0 {
-                    d.phase = .Done;
-                    break;
+                    d.phase = .Done
+                    break
                 }
-                written += n;
+                written += n
             }
             case .ChunkData {
                 if d.remaining <= 0 {
-                    d.phase = .ChunkCRLF;
-                    break;
+                    d.phase = .ChunkCRLF
+                    break
                 }
-                n := copy_limited(r, dest[written .. dest.count], d.remaining);
+                n := copy_limited(r, dest[written .. dest.count], d.remaining)
                 if n == 0 {
-                    d.failed = true;
-                    return .{ Err = .ResponseParseFailed };
+                    d.failed = true
+                    return .{ Err = .ResponseParseFailed }
                 }
-                written += n;
-                d.remaining -= cast(i64) n;
-                if d.remaining == 0 do d.phase = .ChunkCRLF;
+                written += n
+                d.remaining -= cast(i64) n
+                if d.remaining == 0 do d.phase = .ChunkCRLF
             }
             case .ChunkSize {
-                if !read_chunk_size(d, r) do return .{ Err = .ResponseParseFailed };
+                if !read_chunk_size(d, r) do return .{ Err = .ResponseParseFailed }
             }
             case .ChunkCRLF {
                 if !consume_crlf(r) {
-                    d.failed = true;
-                    return .{ Err = .ResponseParseFailed };
+                    d.failed = true
+                    return .{ Err = .ResponseParseFailed }
                 }
-                d.phase = .ChunkSize;
+                d.phase = .ChunkSize
             }
             case .Trailers {
                 if !consume_trailers(r) {
-                    d.failed = true;
-                    return .{ Err = .ResponseParseFailed };
+                    d.failed = true
+                    return .{ Err = .ResponseParseFailed }
                 }
-                d.phase = .Done;
+                d.phase = .Done
             }
             case .Done {}
         }
     }
 
-    if d.failed do return .{ Err = .ResponseParseFailed };
-    return .{ Ok = written };
+    if d.failed do return .{ Err = .ResponseParseFailed }
+    return .{ Ok = written }
 }
 
 #local
 copy_limited :: (r: &io.Reader, dest: [] u8, limit: i64) -> u32 {
-    if dest.count == 0 || limit <= 0 do return 0;
+    if dest.count == 0 || limit <= 0 do return 0
 
     if r.start >= r.end {
-        if r.done do return 0;
-        b := r->read_byte();
-        if r.done && r.start == r.end do return 0;
-        dest[0] = b;
-        return 1;
+        if r.done do return 0
+        b := r->read_byte()
+        if r.done && r.start == r.end do return 0
+        dest[0] = b
+        return 1
     }
 
-    available := r.end - r.start;
-    take := available;
-    if take > dest.count do take = dest.count;
-    if cast(i64) take > limit do take = ~~limit;
-    memory.copy(dest.data, r.buffer.data + r.start, take);
-    r.start += take;
-    return take;
+    available := r.end - r.start
+    take := available
+    if take > dest.count do take = dest.count
+    if cast(i64) take > limit do take = ~~limit
+    memory.copy(dest.data, r.buffer.data + r.start, take)
+    r.start += take
+    return take
 }
 
 #local
 read_chunk_size :: (d: &Body_Decoder, r: &io.Reader) -> bool {
     while true {
         if r.start >= r.end && r.done {
-            d.failed = true;
-            return false;
+            d.failed = true
+            return false
         }
-        b := r->read_byte();
+        b := r->read_byte()
         if r.done && r.start == r.end {
-            d.failed = true;
-            return false;
+            d.failed = true
+            return false
         }
-        if b == #char "\n" do break;
-        if b == #char "\r" do continue;
+        if b == #char "\n" do break
+        if b == #char "\r" do continue
         if d.line_len >= d.line.count {
-            d.failed = true;
-            return false;
+            d.failed = true
+            return false
         }
-        d.line[d.line_len] = b;
-        d.line_len += 1;
+        d.line[d.line_len] = b
+        d.line_len += 1
     }
 
-    line := str.strip_whitespace(d.line[0 .. d.line_len]);
-    d.line_len = 0;
-    size_text, _ := str.bisect(line, #char ";");
-    size_text = str.strip_whitespace(size_text);
+    line := str.strip_whitespace(d.line[0 .. d.line_len])
+    d.line_len = 0
+    size_text, _ := str.bisect(line, #char ";")
+    size_text = str.strip_whitespace(size_text)
     if !size_text || !all_hex(size_text) {
-        d.failed = true;
-        return false;
+        d.failed = true
+        return false
     }
 
-    size := conv.parse_int(size_text, base=16);
+    size := conv.parse_int(size_text, base=16)
     if size == 0 {
-        d.phase = .Trailers;
-        return true;
+        d.phase = .Trailers
+        return true
     }
-    d.remaining = size;
-    d.phase = .ChunkData;
-    return true;
+    d.remaining = size
+    d.phase = .ChunkData
+    return true
 }
 
 #local
 consume_crlf :: (r: &io.Reader) -> bool {
-    if r.start >= r.end && r.done do return false;
-    b := r->read_byte();
-    if r.done && r.start == r.end do return false;
+    if r.start >= r.end && r.done do return false
+    b := r->read_byte()
+    if r.done && r.start == r.end do return false
     if b == #char "\r" {
-        if r.start >= r.end && r.done do return false;
-        b = r->read_byte();
-        if r.done && r.start == r.end do return false;
+        if r.start >= r.end && r.done do return false
+        b = r->read_byte()
+        if r.done && r.start == r.end do return false
     }
-    return b == #char "\n";
+    return b == #char "\n"
 }
 
 #local
 consume_trailers :: (r: &io.Reader) -> bool {
     while !r.done || r.start < r.end {
-        line := r->read_line(consume_newline=true);
-        defer delete(&line);
-        if !str.strip_whitespace(line) do return true;
-        if r.done && r.start == r.end do break;
+        line := r->read_line(consume_newline=true)
+        defer delete(&line)
+        if !str.strip_whitespace(line) do return true
+        if r.done && r.start == r.end do break
     }
-    return false;
+    return false
 }
 
 response_has_body :: (resp: &Response, method: Method) -> bool {
-    kind, length, ok := classify_body(resp, method);
-    if !ok do return false;
-    if kind == .Chunked || kind == .UntilEof do return true;
-    return kind == .Length && length > 0;
+    kind, length, ok := classify_body(resp, method)
+    if !ok do return false
+    if kind == .Chunked || kind == .UntilEof do return true
+    return kind == .Length && length > 0
 }
 
 #local
 read_live :: (r: &Response, dest: [] u8) -> Result(u32, Error) {
-    live := r.live;
-    if live.finished do return .{ Ok = 0 };
+    live := r.live
+    if live.finished do return .{ Ok = 0 }
 
-    result := live.decoder->read(&live.reader, dest);
+    result := live.decoder->read(&live.reader, dest)
     if live.read_stream.timed_out {
-        live.failed = true;
-        release_streamed_body(live);
-        return .{ Err = .Timeout };
+        live.failed = true
+        release_streamed_body(live)
+        return .{ Err = .Timeout }
     }
     if result.Err {
-        live.failed = true;
-        release_streamed_body(live);
-        return result;
+        live.failed = true
+        release_streamed_body(live)
+        return result
     }
     if live.decoder->done() {
-        release_streamed_body(live);
+        release_streamed_body(live)
     }
-    return result;
+    return result
 }
 
 #local
 all_hex :: (s: str) -> bool {
-    if !s do return false;
+    if !s do return false
     for c in s {
-        digit := false;
-        if c >= #char "0" && c <= #char "9" do digit = true;
-        if c >= #char "a" && c <= #char "f" do digit = true;
-        if c >= #char "A" && c <= #char "F" do digit = true;
-        if !digit do return false;
+        digit := false
+        if c >= #char "0" && c <= #char "9" do digit = true
+        if c >= #char "a" && c <= #char "f" do digit = true
+        if c >= #char "A" && c <= #char "F" do digit = true
+        if !digit do return false
     }
-    return true;
+    return true
 }

@@ -4,149 +4,149 @@ use http
 use core {sync, time, string, iter, alloc, Result, tprintf, io}
 
 Client :: struct {
-    transport: &Transport = Default_Transport.make();
+    transport: &Transport = Default_Transport.make()
 
-    default_headers: Headers = Headers.make();
+    default_headers: Headers = Headers.make()
 
-    cookies: CookieJar = CookieJar.make();
+    cookies: CookieJar = CookieJar.make()
 
-    default_timeout := 10 * time.SECOND;
+    default_timeout := 10 * time.SECOND
 
-    max_redirects := 10;
+    max_redirects := 10
 }
 
 Client.free :: (c: &Client) {
-    c.default_headers->free();
-    c.cookies->free();
-    c.transport->free();
+    c.default_headers->free()
+    c.cookies->free()
+    c.transport->free()
 }
 
 Client.send :: (c: &Client, req: &Request) -> Result(&Response, Error) {
-    return send_following(c, req, false);
+    return send_following(c, req, false)
 }
 
 Client.open :: (c: &Client, req: &Request) -> Result(&Response, Error) {
-    return send_following(c, req, true);
+    return send_following(c, req, true)
 }
 
 #local
 send_following :: (c: &Client, req: &Request, stream: bool) -> Result(&Response, Error) {
     if !req.headers->has("user-agent") {
-        req.headers->set("user-agent", tprintf("onyx-http-client/{}", Version));
+        req.headers->set("user-agent", tprintf("onyx-http-client/{}", Version))
     }
 
-    current := req;
-    owned: &Request = null;
-    defer if owned do owned->free();
+    current := req
+    owned: &Request = null
+    defer if owned do owned->free()
 
-    followed := 0;
+    followed := 0
     while true {
-        prev := current.stream_response;
-        current.stream_response = stream;
-        resp := c.transport->send_request(current);
-        current.stream_response = prev;
-        if resp.Err do return resp;
+        prev := current.stream_response
+        current.stream_response = stream
+        resp := c.transport->send_request(current)
+        current.stream_response = prev
+        if resp.Err do return resp
 
-        parsed := resp.Ok->unwrap();
+        parsed := resp.Ok->unwrap()
         if parsed.headers->has("set-cookie") {
-            c.cookies->ingress_from_headers(parsed.headers, current.url);
+            c.cookies->ingress_from_headers(parsed.headers, current.url)
         }
 
-        location := parsed.headers->get("location");
+        location := parsed.headers->get("location")
         if c.max_redirects == 0 || !location || !is_redirect_status(parsed.status) {
-            return resp;
+            return resp
         }
 
         if followed >= c.max_redirects {
-            parsed->free();
-            return .{ Err = .TooManyRedirects };
+            parsed->free()
+            return .{ Err = .TooManyRedirects }
         }
 
-        next_url := resolve_redirect(current.url, location);
+        next_url := resolve_redirect(current.url, location)
         if !next_url {
-            return resp;
+            return resp
         }
 
-        next_method := method_for_redirect(parsed.status, current.method);
+        next_method := method_for_redirect(parsed.status, current.method)
         if next_method == current.method && current.body_stream {
             if current.body_stream->seek(0, io.SeekFrom.Start) != .None {
-                return resp;
+                return resp
             }
         }
 
-        followed += 1;
-        next := redirect_request(c, current, parsed.status, next_url);
-        parsed->free();
+        followed += 1
+        next := redirect_request(c, current, parsed.status, next_url)
+        parsed->free()
 
-        if owned do owned->free();
-        owned = next;
-        current = next;
+        if owned do owned->free()
+        owned = next
+        current = next
     }
 
-    return .{ Err = .TooManyRedirects };
+    return .{ Err = .TooManyRedirects }
 }
 
 Client.new_request :: #match {
     (c: &Client) -> &Request {
-        req := http.client.new_request();
-        req.headers = c.default_headers->clone();
-        req.cookies = c.cookies->clone();
-        req.timeout = c.default_timeout;
-        return req;
+        req := http.client.new_request()
+        req.headers = c.default_headers->clone()
+        req.cookies = c.cookies->clone()
+        req.timeout = c.default_timeout
+        return req
     },
 
     (c: &Client, method: Method, url: str) -> &Request {
-        req := http.client.new_request(method, url);
-        req.headers = c.default_headers->clone();
-        req.cookies = c.cookies->clone();
-        req.timeout = c.default_timeout;
-        return req;
+        req := http.client.new_request(method, url)
+        req.headers = c.default_headers->clone()
+        req.cookies = c.cookies->clone()
+        req.timeout = c.default_timeout
+        return req
     }
 }
 
 Client.get :: #match {
     (c: &Client, url: str, query_params: [] QueryParam) -> Result(&Response, Error) {
-        q := Query.{};
-        defer q->free();
+        q := Query.{}
+        defer q->free()
 
-        for & query_params do q->set(it.key, it.value);
+        for & query_params do q->set(it.key, it.value)
 
-        return c->get(url, &q);
+        return c->get(url, &q)
     },
 
     (c: &Client, url: str, query: &Query = null) -> Result(&Response, Error) {
-        req := c->new_request(.Get, url);
-        defer req->free();
+        req := c->new_request(.Get, url)
+        defer req->free()
 
-        if query do req->set_query(query);
+        if query do req->set_query(query)
 
-        return c->send(req);
+        return c->send(req)
     },
 }
 
 Client.post :: (c: &Client, url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
-    req := c->new_request(.Post, url);
-    req.headers->set("content-type", content_type);
-    req.body = data;
+    req := c->new_request(.Post, url)
+    req.headers->set("content-type", content_type)
+    req.body = data
 
-    defer req->free();
+    defer req->free()
 
-    return c->send(req);
+    return c->send(req)
 }
 
 is_redirect_status :: (status: u32) -> bool {
-    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308
 }
 
 method_for_redirect :: (status: u32, method: Method) -> Method {
-    if status == 301 || status == 302 || status == 303 do return .Get;
-    return method;
+    if status == 301 || status == 302 || status == 303 do return .Get
+    return method
 }
 
 #local
 redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &Request {
-    parsed := destructure_url(next_url)->unwrap();
-    method := method_for_redirect(status, req.method);
+    parsed := destructure_url(next_url)->unwrap()
+    method := method_for_redirect(status, req.method)
 
     next := alloc.on_heap(Request.{
         method = method,
@@ -155,57 +155,57 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
         cookies = c.cookies->clone(),
         timeout = req.timeout,
         url_storage = next_url,
-    });
+    })
 
     for iter.as_iter(&req.cookies.cookies) {
-        next.cookies->set(it.value);
+        next.cookies->set(it.value)
     }
 
     if method == .Get && req.method != .Get {
-        next.body = .{};
-        next.body_stream = null;
-        next.form = null;
-        next.headers->delete("content-type");
-        next.headers->delete("content-length");
-        next.headers->delete("transfer-encoding");
+        next.body = .{}
+        next.body_stream = null
+        next.form = null
+        next.headers->delete("content-type")
+        next.headers->delete("content-length")
+        next.headers->delete("transfer-encoding")
     } else {
-        next.body = req.body;
-        next.body_stream = req.body_stream;
-        next.body_length = req.body_length;
-        next.form = req.form;
+        next.body = req.body
+        next.body_stream = req.body_stream
+        next.body_length = req.body_length
+        next.form = req.form
     }
 
     if !str.equal_insensitive(req.url.host, parsed.host) {
-        next.headers->delete("authorization");
+        next.headers->delete("authorization")
     }
 
-    return next;
+    return next
 }
 
-default_client: Client;
+default_client: Client
 #local default_client_init_once: sync.Once
 #local init_default_client :: () {
-    default_client = .{};
+    default_client = .{}
 }
 
 get :: #match #local {}
 
 #overload
 get :: (url: str, query_params: [] QueryParam) -> Result(&Response, Error) {
-    default_client_init_once->exec(init_default_client);
+    default_client_init_once->exec(init_default_client)
 
-    return default_client->get(url, query_params);
+    return default_client->get(url, query_params)
 }
 
 #overload
 get :: (url: str, query: &Query = null) -> Result(&Response, Error) {
-    default_client_init_once->exec(init_default_client);
+    default_client_init_once->exec(init_default_client)
 
-    return default_client->get(url, query);
+    return default_client->get(url, query)
 }
 
 post :: (url: str, content_type: str, data: [] u8) -> Result(&Response, Error) {
-    default_client_init_once->exec(init_default_client);
+    default_client_init_once->exec(init_default_client)
 
-    return default_client->post(url, content_type, data);
+    return default_client->post(url, content_type, data)
 }
