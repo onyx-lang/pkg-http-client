@@ -74,7 +74,7 @@ CookieJar.set :: (c: &CookieJar, cookie: Cookie) {
         new_cookie.uenc_value = c.string_pool->add(new_cookie.uenc_value)
     }
 
-    c.cookies[c->map_key(new_cookie)] = new_cookie
+    c.cookies[map_key(c, new_cookie)] = new_cookie
 }
 
 CookieJar.drop_any_host :: (c: &CookieJar) {
@@ -104,7 +104,7 @@ CookieJar.delete :: (c: &CookieJar, key: str) {
 CookieJar.ingress_from_headers :: (c: &CookieJar, h: Headers, url: Url) {
     now := time.Instant.now()->to_unix()
     for h->values("set-cookie") {
-        c->ingest_one(it, url, now)
+        ingest_one(c, it, url, now)
     }
 }
 
@@ -131,13 +131,13 @@ CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
 }
 
 #local
-CookieJar.map_key :: (c: &CookieJar, cookie: Cookie) -> str {
+map_key :: (c: &CookieJar, cookie: Cookie) -> str {
     id := tprintf("{}\x1f{}\x1f{}", cookie.key, cookie.domain, cookie.path)
     return c.string_pool->add(id)
 }
 
 #local
-CookieJar.ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
+ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
     key_value, props := str.bisect(raw, #char ";")
     key_value = str.strip_whitespace(key_value)
     if !key_value do return
@@ -207,12 +207,12 @@ CookieJar.ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
 
     if has_max_age {
         if max_age <= 0 {
-            c->delete_exact(decoded_key, domain, path)
+            delete_exact(c, decoded_key, domain, path)
             return
         }
         expires_at = now + max_age
     } elseif expires_at != 0 && expires_at <= now {
-        c->delete_exact(decoded_key, domain, path)
+        delete_exact(c, decoded_key, domain, path)
         return
     }
 
@@ -230,7 +230,7 @@ CookieJar.ingest_one :: (c: &CookieJar, raw: str, url: Url, now: i64) {
 }
 
 #local
-CookieJar.delete_exact :: (c: &CookieJar, key, domain, path: str) {
+delete_exact :: (c: &CookieJar, key, domain, path: str) {
     id := tprintf("{}\x1f{}\x1f{}", key, domain, path)
     c.cookies->remove(id)
 }
@@ -332,3 +332,4 @@ is_public_suffix :: (domain: str) -> bool {
     }
     return false
 }
+
