@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, net, io, sync, alloc, iter, time, hash, Result, memory, conv}
+use core {package, net, io, sync, alloc, time, hash, Result, memory, conv}
 use core.encoding.base64
 use tls
 

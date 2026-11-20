@@ -1,6 +1,6 @@
 package http.client
 
-use core {package, alloc, io, string, iter, time, conv}
+use core {package, alloc, io, time, conv}
 use core.encoding.json
 use core.encoding.base64
 
@@ -54,7 +54,7 @@ new_request :: #match #local {}
 
 #overload
 new_request :: (method: Method, url: str) -> &Request {
-    req := alloc.on_heap(Request.{
+    req := new(Request.{
         method = method,
     })
 
@@ -67,7 +67,7 @@ new_request :: (method: Method, url: str) -> &Request {
 
 #overload
 new_request :: () -> &Request {
-    return alloc.on_heap(Request.{})
+    return new(Request.{})
 }
 
 

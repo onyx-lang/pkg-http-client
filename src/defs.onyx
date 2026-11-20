@@ -1,6 +1,6 @@
 package http.client
 
-use core { package, string, conv, iter, io, random, os }
+use core { package, conv, io, random, os }
 
 Version :: "0.1.0"
 

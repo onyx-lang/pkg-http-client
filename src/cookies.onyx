@@ -1,6 +1,6 @@
 package http.client
 
-use core {time, io, string, iter, conv, tprintf}
+use core {time, io, string, conv, tprintf}
 
 CookieJar :: struct {
     cookies: Map(str, Cookie)
@@ -38,8 +38,8 @@ CookieJar.clear :: (c: &CookieJar) {
 CookieJar.clone :: (c: &CookieJar) -> CookieJar {
     new_jar := CookieJar.make()
 
-    for iter.as_iter(&c.cookies) {
-        new_jar->set(it.value)
+    for _, value in c.cookies {
+        new_jar->set(value)
     }
 
     return new_jar
@@ -81,8 +81,8 @@ CookieJar.drop_any_host :: (c: &CookieJar) {
     doomed: [..] str
     defer delete(&doomed)
 
-    for iter.as_iter(&c.cookies) {
-        if it.value.any_host do doomed << it.key
+    for key, value in c.cookies {
+        if value.any_host do doomed << key
     }
 
     for doomed do c.cookies->remove(it)
@@ -92,9 +92,9 @@ CookieJar.delete :: (c: &CookieJar, key: str) {
     doomed: [..] str
     defer delete(&doomed)
 
-    for iter.as_iter(&c.cookies) {
-        if it.value.key == key {
-            doomed << it.key
+    for k, v in c.cookies {
+        if v.key == key {
+            doomed << k
         }
     }
 
@@ -114,8 +114,8 @@ CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
     now := time.Instant.now()->to_unix()
     wrote := false
 
-    for iter.as_iter(&c.cookies) {
-        if !cookie_matches(it.value, url, now) do continue
+    for key, value in c.cookies {
+        if !cookie_matches(value, url, now) do continue
 
         if !wrote {
             w->write( "Cookie: ")
@@ -124,7 +124,7 @@ CookieJar.write_header :: (c: &CookieJar, url: Url, w: &io.Writer) {
             w->write( "; ")
         }
 
-        w->write_format( "{}={}", it.value.uenc_key, it.value.uenc_value)
+        w->write_format( "{}={}", value.uenc_key, value.uenc_value)
     }
 
     if wrote do w->write( "\r\n")

@@ -6,6 +6,7 @@ package http.client
 #local MAX_BITS :: 15
 #local MAX_SYMS :: 320
 
+#local
 Huffman :: struct {
     counts: [16] i32
     symbols: [MAX_SYMS] i32

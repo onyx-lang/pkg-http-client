@@ -1,7 +1,7 @@
 package http.client
 
 use http
-use core {sync, time, string, iter, alloc, Result, tprintf, io}
+use core {sync, time, alloc, Result, tprintf, io}
 
 Client :: struct {
     transport: &Transport = Default_Transport.make()
@@ -194,7 +194,7 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
 
     cross_host := !str.equal_insensitive(req.url.host, parsed.host)
 
-    next := alloc.on_heap(Request.{
+    next := new(Request.{
         method = method,
         headers = req.headers->clone(),
         url = parsed,
@@ -208,9 +208,9 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
 
     if cross_host do next.cookies->drop_any_host()
 
-    for iter.as_iter(&req.cookies.cookies) {
-        if cross_host && it.value.any_host do continue
-        next.cookies->set(it.value)
+    for _, value in req.cookies.cookies {
+        if cross_host && value.any_host do continue
+        next.cookies->set(value)
     }
 
     method_changed := method != req.method
