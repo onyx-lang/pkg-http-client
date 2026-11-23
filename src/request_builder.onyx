@@ -199,6 +199,11 @@ RequestBuilder.cleanup :: (rb: RequestBuilder) {
     cfree(r)
 }
 
+#overload
+__dispose_used_local :: macro (rb: &RequestBuilder) {
+    rb.*->cleanup()
+}
+
 RequestBuilder.prepare :: (rb: RequestBuilder) -> RequestBuilder {
     r := cast(&_RequestBuilder, rb)
     r.request->set_query(&r.query)
