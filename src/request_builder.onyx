@@ -13,11 +13,10 @@ _RequestBuilder :: struct {
 
     request: &Request
 
-    // TODO: Keep track of allocator used to allocate this string.
-    body_to_free: str
+    body_to_free: ? Buf(u8)
 }
 
-request_builder :: (client: &Client) -> RequestBuilder {
+RequestBuilder.make :: (client: &Client) -> RequestBuilder {
     r := new(_RequestBuilder)
 
     r.client = client
@@ -188,12 +187,12 @@ RequestBuilder.cleanup :: (rb: RequestBuilder) {
     r := cast(&_RequestBuilder, rb)
     r.query->free()
 
-    if r.body_to_free {
-        delete(&r.body_to_free)
+    if r.body_to_free as &body {
+        delete(body)
     }
 
-    if r.form {
-        r.form->unwrap_ptr()->free()
+    if r.form as &form {
+        form->free()
     }
 
     r.request->free()
@@ -204,8 +203,8 @@ RequestBuilder.prepare :: (rb: RequestBuilder) -> RequestBuilder {
     r := cast(&_RequestBuilder, rb)
     r.request->set_query(&r.query)
 
-    if r.form {
-        r.request->set_form(r.form->unwrap_ptr())
+    if r.form as &form {
+        r.request->set_form(form)
     }
 
     return rb
@@ -250,7 +249,7 @@ RequestBuilder.set_body_json :: (rb: RequestBuilder, v: $T) -> RequestBuilder {
     // But that may be true by default soon anyway.
     json_string := json.encode_string(v)
 
-    r.body_to_free = json_string
+    r.body_to_free = .{json_string, context.allocator}
     r.request->set_body(json_string)
     r.request.headers->set("content-type", "application/json")
 
