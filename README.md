@@ -5,16 +5,15 @@ HTTP/1.1 client for Onyx. It speaks plain HTTP and HTTPS, keeps a small connecti
 ```onyx
 use http.client {Client}
 
-client := Client.{};
-defer client->free();
+use client := Client.make()
 
-result := client->get("https://example.com/");
+result := client->get("https://example.com/")
 if result.Err as e {
-    printf("request failed: {}\n", e);
-    return;
+    printf("request failed: {}\n", e)
+    return
 }
 
-resp := result!;
-defer resp->free();
-printf("{}\n", resp.status);
+resp := result!
+defer resp->free()
+printf("{}\n", resp.status)
 ```
