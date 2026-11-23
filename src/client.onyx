@@ -259,7 +259,7 @@ redirect_request :: (c: &Client, req: &Request, status: u32, next_url: str) -> &
 default_client: Client
 #local default_client_init_once: sync.Once
 #local init_default_client :: () {
-    default_client = .{}
+    default_client = Client.make()
 }
 
 get :: #match #local {}

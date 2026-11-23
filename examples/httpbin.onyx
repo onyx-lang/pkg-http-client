@@ -1,7 +1,8 @@
 #load "../module"
 
 #library_path "./bin"
-#inject runtime.vars.Enable_Heap_Debug :: true
+
+#package_parameters core.alloc.heap(Debug = true)
 
 use runtime
 use core {package, *}
@@ -28,7 +29,7 @@ main :: () {
     }
 
     alloc.arena.auto_temp() {
-        resp := http.client.request_builder(&client)
+        resp := http.client.RequestBuilder.make(&client)
                 ->set_url("https://httpbin.org/post")
                 ->set_method(.Post)
                 ->set_query("query", "work")
